@@ -9,7 +9,7 @@ export const multibaasEnabled = Boolean(base && key);
 const api = () => new MultiBaas.EventQueriesApi(new MultiBaas.Configuration({ basePath: new URL('/api/v0', base!).toString(), accessToken: key! }));
 const byAlias = (alias: string): MultiBaas.EventQueryFilter => ({ fieldType: 'contract_address_alias', operator: 'equal', value: alias });
 
-export type MbBook = { registered: Record<string, any>[]; paid: Record<string, any>[]; trades: Record<string, any>[] };
+export type MbBook = { registered: Record<string, any>[]; paid: Record<string, any>[]; trades: Record<string, any>[]; credit: Record<string, any>[] };
 
 export async function fetchBookFromMultiBaas(): Promise<MbBook> {
   // MultiBaas returns at most 50 rows per request; page with offset.
@@ -22,7 +22,7 @@ export async function fetchBookFromMultiBaas(): Promise<MbBook> {
     }
     return rows.slice(0, max);
   };
-  const [registered, paid, trades] = await Promise.all([
+  const [registered, paid, trades, credit] = await Promise.all([
     q({
       events: [
         {
@@ -60,6 +60,35 @@ export async function fetchBookFromMultiBaas(): Promise<MbBook> {
       },
       20,
     ),
+    q(
+      {
+        events: [
+          {
+            eventName: 'DebtorRated',
+            select: [
+              { type: 'input', inputIndex: 0, alias: 'debtor' },
+              { type: 'input', inputIndex: 1, alias: 'grade' },
+              { type: 'input', inputIndex: 2, alias: 'rate_bps' },
+              { type: 'triggered_at', alias: 'at' },
+            ],
+            filter: byAlias('tegata_credit_risk'),
+          },
+          {
+            eventName: 'CreditEventRecorded',
+            select: [
+              { type: 'input', inputIndex: 0, alias: 'debtor' },
+              { type: 'input', inputIndex: 1, alias: 'kind' },
+              { type: 'input', inputIndex: 3, alias: 'rate_bps' },
+              { type: 'triggered_at', alias: 'at' },
+            ],
+            filter: byAlias('tegata_credit_risk'),
+          },
+        ],
+        orderBy: 'at',
+        order: 'DESC',
+      },
+      20,
+    ),
   ]);
-  return { registered, paid, trades };
+  return { registered, paid, trades, credit };
 }

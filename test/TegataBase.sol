@@ -20,12 +20,13 @@ import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmo
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {InvoiceRegistry} from "../src/rwa/InvoiceRegistry.sol";
+import {CreditRiskModel} from "../src/rwa/CreditRiskModel.sol";
 import {InvoiceToken} from "../src/rwa/InvoiceToken.sol";
 import {MockJPYC} from "../src/rwa/MockJPYC.sol";
 import {MaturityCurveHook} from "../src/hook/MaturityCurveHook.sol";
 
 /// Fixture: operator verifies a supplier (下請 Sakura Seiko) and a debtor (Tokyo Motors); the supplier registers
-/// a ¥1,000,000 invoice due in 90 days at a 3% discount rate; the debtor accepts; an investor posts JPYC bids along
+/// a ¥1,000,000 invoice due in 90 days. The debtor is rated grade 2 (1% base + 2% spread = 3% discount rate); the debtor accepts; an investor posts JPYC bids along
 /// the curve in a hooked Uniswap v4 pool.
 abstract contract TegataBase is Test {
     using StateLibrary for IPoolManager;
@@ -33,7 +34,8 @@ abstract contract TegataBase is Test {
     uint256 constant FRI_1000_JST = 1_790_298_000; // 2026-09-25 10:00 JST
     uint160 constant FLAGS = Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG;
     uint256 constant FACE = 1_000_000e18;
-    uint32 constant DISCOUNT_BPS = 300;
+    uint32 constant DISCOUNT_BPS = 300; // debtor's rate: base 100 + grade-2 spread 200
+    uint8 constant DEBTOR_GRADE = 2;
     int24 constant SPACING = 10;
     bytes32 constant DOC = keccak256("invoice-2026-0925-SAKURA-TOKYOMOTORS.pdf");
 
@@ -44,6 +46,7 @@ abstract contract TegataBase is Test {
 
     IPoolManager manager;
     MockJPYC jpyc;
+    CreditRiskModel risk;
     InvoiceRegistry registry;
     MaturityCurveHook hook;
     PoolModifyLiquidityTest lpRouter;
@@ -59,7 +62,8 @@ abstract contract TegataBase is Test {
         vm.warp(FRI_1000_JST);
         manager = new PoolManager(address(this));
         jpyc = new MockJPYC(address(this));
-        registry = new InvoiceRegistry(jpyc, operator);
+        risk = new CreditRiskModel(operator);
+        registry = new InvoiceRegistry(jpyc, risk, operator);
 
         bytes memory args = abi.encode(manager, registry, Currency.wrap(address(jpyc)), operator);
         (address hookAddr, bytes32 salt) = HookMiner.find(address(this), FLAGS, type(MaturityCurveHook).creationCode, args);
@@ -71,11 +75,13 @@ abstract contract TegataBase is Test {
         vm.startPrank(operator);
         registry.verifyCompany(supplier, keccak256("corp:1010001000001"), unicode"株式会社さくら精工");
         registry.verifyCompany(debtor, keccak256("corp:2010001000002"), unicode"東京モーターズ株式会社");
+        risk.setRegistry(address(registry));
+        risk.rate(debtor, DEBTOR_GRADE);
         vm.stopPrank();
 
         maturity = uint64(block.timestamp + 90 days);
         vm.prank(supplier);
-        invoiceId = registry.registerInvoice(debtor, FACE, maturity, DISCOUNT_BPS, DOC);
+        invoiceId = registry.registerInvoice(debtor, FACE, maturity, DOC);
         vm.prank(debtor);
         registry.acceptInvoice(invoiceId);
         token = registry.invoice(invoiceId).token;

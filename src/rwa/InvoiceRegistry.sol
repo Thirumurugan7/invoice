@@ -6,11 +6,14 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {InvoiceToken} from "./InvoiceToken.sol";
+import {CreditRiskModel} from "./CreditRiskModel.sol";
 
 /// @title InvoiceRegistry — tokenized receivables settled in JPYC (a digital replacement for paper 手形)
 /// @notice Lifecycle:
 ///   1. OPERATOR (platform; a MultiBaas Cloud Wallet / HSM key) verifies companies (KYB: hashed 法人番号).
-///   2. A verified supplier registers an invoice against a verified debtor. The invoice document hash can be
+///   2. A verified supplier registers an invoice against a verified, RATED debtor. The discount rate is not the
+///      supplier's choice: the fair-value curve uses the debtor's live rate from CreditRiskModel (rating + payment
+///      history), so a downgrade or default reprices all of that debtor's invoices. The invoice document hash can be
 ///      registered only once, so the same receivable cannot be financed twice (二重譲渡).
 ///   3. The debtor accepts (like でんさい 発生記録): face-value tokens are minted to the supplier. Now it is an
 ///      acknowledged, tradable claim priced on a discount curve that accretes to face at maturity.
@@ -43,7 +46,7 @@ contract InvoiceRegistry is AccessControl {
         uint256 face; // JPYC wei (18 decimals); also the token supply
         uint64 issuedAt;
         uint64 maturity;
-        uint32 discountBps; // annual simple discount rate used for the fair-value curve
+        uint32 rateAtIssueBps; // debtor's rate when registered (informational; the curve uses the live rate)
         bool frozen; // operator fraud/dispute flag: halts trading
         Status status;
         uint256 funded; // JPYC paid in by the debtor
@@ -52,6 +55,7 @@ contract InvoiceRegistry is AccessControl {
     }
 
     IERC20 public immutable jpyc;
+    CreditRiskModel public immutable risk;
     uint256 public invoiceCount;
     mapping(uint256 => Invoice) internal _invoices;
     mapping(address => uint256) public idOfToken;
@@ -68,7 +72,7 @@ contract InvoiceRegistry is AccessControl {
         address token,
         uint256 face,
         uint64 maturity,
-        uint32 discountBps,
+        uint32 rateAtIssueBps,
         bytes32 docHash
     );
     event InvoiceAccepted(uint256 indexed id, address indexed debtor, address token, uint256 face);
@@ -80,6 +84,7 @@ contract InvoiceRegistry is AccessControl {
     event Redeemed(uint256 indexed id, address indexed holder, uint256 tokens, uint256 jpycPaid);
 
     error NotVerified(address company);
+    error NotRated(address debtor);
     error InvalidTerms();
     error DuplicateInvoice(uint256 existingId);
     error NotDebtor();
@@ -87,8 +92,9 @@ contract InvoiceRegistry is AccessControl {
     error NotYetDefaultable(uint256 at);
     error NothingToRedeem();
 
-    constructor(IERC20 jpyc_, address admin) {
+    constructor(IERC20 jpyc_, CreditRiskModel risk_, address admin) {
         jpyc = jpyc_;
+        risk = risk_;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(OPERATOR_ROLE, admin);
     }
@@ -115,16 +121,18 @@ contract InvoiceRegistry is AccessControl {
     }
 
     // ---------------------------------------------------------------- lifecycle
-    function registerInvoice(address debtor, uint256 face, uint64 maturity, uint32 discountBps, bytes32 docHash)
+    function registerInvoice(address debtor, uint256 face, uint64 maturity, bytes32 docHash)
         external
         returns (uint256 id)
     {
         if (!isVerified(msg.sender)) revert NotVerified(msg.sender);
         if (!isVerified(debtor)) revert NotVerified(debtor);
-        if (face == 0 || debtor == msg.sender || maturity < block.timestamp + MIN_TENOR || discountBps > 5_000) {
+        if (!risk.isRated(debtor)) revert NotRated(debtor);
+        if (face == 0 || debtor == msg.sender || maturity < block.timestamp + MIN_TENOR) {
             revert InvalidTerms();
         }
         if (idOfDocHash[docHash] != 0) revert DuplicateInvoice(idOfDocHash[docHash]);
+        uint32 rateNow = risk.rateBps(debtor);
 
         id = ++invoiceCount;
         string memory n = Strings.toString(id);
@@ -136,7 +144,7 @@ contract InvoiceRegistry is AccessControl {
             face: face,
             issuedAt: uint64(block.timestamp),
             maturity: maturity,
-            discountBps: discountBps,
+            rateAtIssueBps: rateNow,
             frozen: false,
             status: Status.Pending,
             funded: 0,
@@ -145,7 +153,7 @@ contract InvoiceRegistry is AccessControl {
         });
         idOfToken[address(token)] = id;
         idOfDocHash[docHash] = id;
-        emit InvoiceRegistered(id, msg.sender, debtor, address(token), face, maturity, discountBps, docHash);
+        emit InvoiceRegistered(id, msg.sender, debtor, address(token), face, maturity, rateNow, docHash);
     }
 
     function acceptInvoice(uint256 id) external {
@@ -177,6 +185,7 @@ contract InvoiceRegistry is AccessControl {
         emit InvoicePaid(id, msg.sender, amount, inv.funded);
         if (inv.funded == inv.face) {
             inv.status = Status.Settled;
+            risk.record(inv.debtor, block.timestamp <= inv.maturity ? CreditRiskModel.CreditEvent.OnTime : CreditRiskModel.CreditEvent.Late, id);
             emit InvoiceSettled(id, inv.funded);
         }
     }
@@ -187,6 +196,7 @@ contract InvoiceRegistry is AccessControl {
         uint256 at = uint256(inv.maturity) + GRACE;
         if (block.timestamp < at) revert NotYetDefaultable(at);
         inv.status = Status.Defaulted;
+        risk.record(inv.debtor, CreditRiskModel.CreditEvent.Default, id);
         emit InvoiceDefaulted(id, inv.funded, inv.face);
     }
 
@@ -207,12 +217,18 @@ contract InvoiceRegistry is AccessControl {
         return _invoices[id];
     }
 
-    /// @notice Fair value of 1 token in JPYC (1e18 = face) at `ts`: simple discount, accreting to face at maturity.
+    /// @notice The debtor's live annual discount rate (bps) that prices this invoice.
+    function rateOf(uint256 id) public view returns (uint32) {
+        return risk.rateBps(_invoices[id].debtor);
+    }
+
+    /// @notice Fair value of 1 token in JPYC (1e18 = face) at `ts`: simple discount at the debtor's live rate,
+    ///         accreting to face at maturity.
     function fairPrice(uint256 id, uint256 ts) public view returns (uint256) {
         Invoice storage inv = _invoices[id];
         if (ts >= inv.maturity) return 1e18;
         uint256 remaining = inv.maturity - ts;
-        return 1e18 * YEAR * BPS / (YEAR * BPS + uint256(inv.discountBps) * remaining);
+        return 1e18 * YEAR * BPS / (YEAR * BPS + uint256(rateOf(id)) * remaining);
     }
 
     function isTradable(uint256 id) public view returns (bool) {

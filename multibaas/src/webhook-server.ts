@@ -4,17 +4,13 @@
 //                         events are indexed immediately (holder registry for the receivables book).
 // - InvoiceRegistered  -> notifies the debtor to accept; InvoiceSettled/Defaulted -> notifies holders to redeem.
 // NOTE: the exact event.emitted `data` shape is read defensively (name + inputs); verify against a live payload.
-import * as MultiBaas from '@curvegrid/multibaas-sdk';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
-import { config, deployment, idempotent, invoiceAlias, LABELS } from './client.ts';
+import { deployment, invoiceAlias, LABELS, linkAlias } from './client.ts';
 
 const secret = process.env.WEBHOOK_SECRET ?? '';
 const port = Number(process.env.WEBHOOK_PORT ?? 8787);
 const d = deployment();
-const cfg = config();
-const contracts = new MultiBaas.ContractsApi(cfg);
-const addresses = new MultiBaas.AddressesApi(cfg);
 
 export function verifySignature(body: Buffer, timestamp: string, signature: string): boolean {
   if (!secret) return false;
@@ -40,11 +36,7 @@ async function onEvent(data: any) {
       const id = String(inputs.id);
       const token = String(inputs.token);
       console.log(`[registered] invoice #${id} face=${inputs.face} debtor=${inputs.debtor} -> ask debtor to accept`);
-      await idempotent(addresses.setAddress({ alias: invoiceAlias(id), address: token }), `alias ${invoiceAlias(id)}`);
-      await idempotent(
-        contracts.linkAddressContract(invoiceAlias(id), { label: LABELS.invoiceToken, version: '1.0', startingBlock: String(d.startBlock) }),
-        `link+sync ${invoiceAlias(id)}`,
-      );
+      await linkAlias(invoiceAlias(id), token, LABELS.invoiceToken, d.startBlock);
       break;
     }
     case 'InvoiceAccepted':
@@ -55,6 +47,12 @@ async function onEvent(data: any) {
       break;
     case 'InvoiceDefaulted':
       console.log(`[defaulted] invoice #${inputs.id} funded ${inputs.funded}/${inputs.face} -> holders redeem pro-rata`);
+      break;
+    case 'DebtorRated':
+      console.log(`[credit] ${inputs.debtor} rated G${inputs.grade} -> rate ${Number(inputs.rateBps) / 100}%: every open invoice of this debtor repriced`);
+      break;
+    case 'CreditEventRecorded':
+      console.log(`[credit] ${inputs.debtor} ${['paid on time', 'paid late', 'DEFAULTED'][Number(inputs.kind)]} on #${inputs.invoiceId} -> rate ${Number(inputs.rateBps) / 100}%`);
       break;
     case 'CurveTrade':
       console.log(`[trade] invoice #${inputs.invoiceId} price=${inputs.price} fair=${inputs.fair} dev=${inputs.deviationBps}bps`);

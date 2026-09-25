@@ -10,6 +10,7 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
 
 import {InvoiceRegistry} from "../src/rwa/InvoiceRegistry.sol";
+import {CreditRiskModel} from "../src/rwa/CreditRiskModel.sol";
 import {InvoiceToken} from "../src/rwa/InvoiceToken.sol";
 import {MockJPYC} from "../src/rwa/MockJPYC.sol";
 import {MaturityCurveHook} from "../src/hook/MaturityCurveHook.sol";
@@ -24,6 +25,7 @@ contract TegataMarketTest is Test {
     address supplier = makeAddr("supplier");
     address debtor = makeAddr("debtor");
     address investor = makeAddr("investor");
+    address buyer = makeAddr("buyer");
 
     MockJPYC jpyc;
     InvoiceRegistry registry;
@@ -36,7 +38,8 @@ contract TegataMarketTest is Test {
         vm.warp(1_790_298_000);
         IPoolManager manager = new PoolManager(address(this));
         jpyc = new MockJPYC(address(this));
-        registry = new InvoiceRegistry(jpyc, operator);
+        CreditRiskModel risk = new CreditRiskModel(operator);
+        registry = new InvoiceRegistry(jpyc, risk, operator);
         bytes memory args = abi.encode(manager, registry, Currency.wrap(address(jpyc)), operator);
         (, bytes32 salt) = HookMiner.find(address(this), FLAGS, type(MaturityCurveHook).creationCode, args);
         hook = new MaturityCurveHook{salt: salt}(manager, registry, Currency.wrap(address(jpyc)), operator);
@@ -45,14 +48,19 @@ contract TegataMarketTest is Test {
         vm.startPrank(operator);
         registry.verifyCompany(supplier, keccak256("corp:1"), "Sakura Seiko");
         registry.verifyCompany(debtor, keccak256("corp:2"), "Tokyo Motors");
+        risk.setRegistry(address(registry));
+        risk.rate(debtor, 2); // 3%
         vm.stopPrank();
         vm.prank(supplier);
-        id = registry.registerInvoice(debtor, 1_000_000e18, uint64(block.timestamp + 90 days), 300, keccak256("pdf"));
+        id = registry.registerInvoice(debtor, 1_000_000e18, uint64(block.timestamp + 90 days), keccak256("pdf"));
         vm.prank(debtor);
         registry.acceptInvoice(id);
         token = registry.invoice(id).token;
 
         jpyc.mint(investor, 1_000_000e18);
+        jpyc.mint(buyer, 1_000_000e18);
+        vm.prank(buyer);
+        jpyc.approve(address(market), type(uint256).max);
         jpyc.mint(debtor, 1_000_000e18);
         vm.prank(investor);
         jpyc.approve(address(market), type(uint256).max);
@@ -60,21 +68,25 @@ contract TegataMarketTest is Test {
         token.approve(address(market), type(uint256).max);
     }
 
+    function _dl() internal view returns (uint256) {
+        return block.timestamp + 10 minutes;
+    }
+
     function test_fullLifecycleThroughMarket() public {
         market.createPool(id);
         assertTrue(market.isPoolCreated(id));
 
         vm.prank(investor);
-        market.postBids(id, 600_000e18, 150);
+        (uint256 pos,) = market.postBids(id, 600_000e18, 0, 150, _dl());
         assertApproxEqAbs(jpyc.balanceOf(investor), 400_000e18, 1e18);
 
         vm.prank(supplier);
-        uint256 cash = market.sell(id, 300_000e18, 290_000e18);
+        uint256 cash = market.sell(id, 300_000e18, 290_000e18, _dl());
         emit log_named_decimal_uint("supplier early cash (JPYC) for 300k face", cash, 18);
         assertGt(cash, 290_000e18);
 
         vm.prank(investor);
-        market.withdrawBids(id);
+        market.withdrawBids(pos, _dl());
         uint256 invTokens = token.balanceOf(investor);
         assertApproxEqAbs(invTokens, 300_000e18, 1e18);
 
@@ -87,18 +99,78 @@ contract TegataMarketTest is Test {
         uint256 before = jpyc.balanceOf(investor);
         vm.prank(investor);
         registry.redeem(id, invTokens);
-        uint256 profit = jpyc.balanceOf(investor) + 0 - 1_000_000e18;
+        uint256 profit = jpyc.balanceOf(investor) - 1_000_000e18;
         emit log_named_decimal_uint("investor profit over 90 days (JPYC)", profit, 18);
         assertEq(jpyc.balanceOf(investor) - before, invTokens);
         assertGt(jpyc.balanceOf(investor), 1_000_000e18); // earned the discount
     }
 
-    function test_marketSlippageProtection() public {
+    function _pooled() internal returns (uint256 pos) {
         market.createPool(id);
         vm.prank(investor);
-        market.postBids(id, 600_000e18, 150);
+        (pos,) = market.postBids(id, 600_000e18, 0, 150, _dl());
+    }
+
+    function test_marketSlippageProtection() public {
+        _pooled();
         vm.prank(supplier);
         vm.expectRevert();
-        market.sell(id, 100_000e18, 100_000e18); // can't get face value before maturity
+        market.sell(id, 100_000e18, 100_000e18, _dl()); // can't get face value before maturity
+    }
+
+    function test_deadlineEnforced() public {
+        _pooled();
+        uint256 dl = block.timestamp - 1;
+        vm.prank(supplier);
+        vm.expectRevert(abi.encodeWithSelector(TegataMarket.Expired.selector, dl));
+        market.sell(id, 1_000e18, 0, dl);
+    }
+
+    function test_exactOutputBothWays() public {
+        _pooled();
+        // Supplier needs exactly ¥50,000 of cash today: sells just enough face.
+        vm.prank(supplier);
+        uint256 faceSold = market.sellExactOut(id, 50_000e18, 52_000e18, _dl());
+        emit log_named_decimal_uint("face sold for exactly 50,000 JPYC", faceSold, 18);
+        assertGt(faceSold, 50_000e18);
+        assertEq(token.balanceOf(supplier), 1_000_000e18 - faceSold);
+
+        // A buyer wants exactly 20,000 face of the invoice back out of the pool.
+        uint256 jpycBefore = jpyc.balanceOf(buyer);
+        vm.prank(buyer);
+        uint256 paid = market.buyExactOut(id, 20_000e18, 20_000e18, _dl());
+        assertEq(token.balanceOf(buyer), 20_000e18);
+        assertEq(jpycBefore - jpyc.balanceOf(buyer), paid);
+        assertLt(paid, 20_000e18); // still below face before maturity
+
+        vm.prank(buyer);
+        vm.expectRevert(); // Slippage: max input too low
+        market.buyExactOut(id, 1_000e18, 900e18, _dl());
+    }
+
+    function test_multipleBidPositionsLadder() public {
+        uint256 p1 = _pooled();
+        vm.startPrank(investor);
+        (uint256 p2,) = market.postBids(id, 100_000e18, 50, 100, _dl()); // a deeper rung
+        (uint256 p3,) = market.postBids(id, 100_000e18, 0, 50, _dl());
+        vm.stopPrank();
+        assertEq(market.positionsOf(investor).length, 3);
+        (, address owner, int24 lo2, int24 hi2,) = market.positions(p2);
+        (,, int24 lo1, int24 hi1,) = market.positions(p1);
+        assertEq(owner, investor);
+        assertTrue(lo2 != lo1 || hi2 != hi1);
+
+        vm.prank(supplier);
+        vm.expectRevert(TegataMarket.NotOwner.selector);
+        market.withdrawBids(p2, _dl());
+
+        vm.startPrank(investor);
+        market.withdrawBids(p2, _dl());
+        vm.expectRevert(TegataMarket.NoPosition.selector);
+        market.withdrawBids(p2, _dl());
+        market.withdrawBids(p3, _dl());
+        market.withdrawBids(p1, _dl());
+        vm.stopPrank();
+        assertApproxEqAbs(jpyc.balanceOf(investor), 1_000_000e18, 1e18);
     }
 }

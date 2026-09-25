@@ -3,7 +3,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { foundry, sepolia } from 'viem/chains';
 import abis from './generated/abis.json';
 
-export const ABI = abis as unknown as Record<'registry' | 'hook' | 'market' | 'token' | 'jpyc' | 'customRevert' | 'hooks', readonly unknown[]>;
+export const ABI = abis as unknown as Record<'registry' | 'risk' | 'hook' | 'market' | 'token' | 'jpyc' | 'customRevert' | 'hooks', readonly unknown[]>;
 
 export type Deployment = {
   chainId: number;
@@ -11,6 +11,7 @@ export type Deployment = {
   poolManager: Address;
   jpyc: Address;
   registry: Address;
+  risk: Address;
   hook: Address;
   market: Address;
   operator: Address;

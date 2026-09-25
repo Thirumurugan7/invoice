@@ -18,6 +18,7 @@ export type Deployment = {
   poolManager: string;
   jpyc: string;
   registry: string;
+  risk: string;
   hook: string;
   market: string;
   operator: string;
@@ -41,12 +42,16 @@ export function forgeArtifact(contract: string): { abi: unknown[]; bin: string }
 /// BaseContract payload for ContractsApi.createContract.
 export function baseContract(label: string, contract: string) {
   const { abi, bin } = forgeArtifact(contract);
-  return { label, contractName: contract, version: '1.0', rawAbi: JSON.stringify(abi), bin };
+  return { label, contractName: contract, version: versionOf(label), rawAbi: JSON.stringify(abi), bin };
 }
+
+/// ABI versions in the MultiBaas library. 2.0 = credit-priced registry + hardened market (2026-09-26).
+export const versionOf = (label: string) => (label === LABELS.poolManager || label === LABELS.invoiceToken ? '1.0' : '2.0');
 
 /// MultiBaas contract labels (ABI library) — also used as address aliases for singletons.
 export const LABELS = {
   registry: 'tegata_invoice_registry',
+  risk: 'tegata_credit_risk',
   hook: 'tegata_curve_hook',
   market: 'tegata_market',
   invoiceToken: 'tegata_invoice_token',
@@ -55,6 +60,24 @@ export const LABELS = {
 
 /// Address alias for invoice #id's token.
 export const invoiceAlias = (id: number | bigint | string) => `tegata_invoice_${id}`;
+
+/// Alias `address` and link it to `label` with event sync from `fromBlock`. After a redeploy the alias may still point
+/// at a superseded contract: drop it and re-point it.
+export async function linkAlias(alias: string, address: string, label: string, fromBlock: number) {
+  const cfg = config();
+  const addresses = new MultiBaas.AddressesApi(cfg);
+  const contracts = new MultiBaas.ContractsApi(cfg);
+  const current = await addresses.getAddress(alias).then((r) => r.data.result.address).catch(() => undefined);
+  if (current && current.toLowerCase() !== address.toLowerCase()) {
+    await addresses.deleteAddress(alias);
+    console.log(`  ok   alias ${alias} moved off superseded ${current}`);
+  }
+  await idempotent(addresses.setAddress({ alias, address }), `alias ${alias} -> ${address}`);
+  await idempotent(
+    contracts.linkAddressContract(alias, { label, version: versionOf(label), startingBlock: String(fromBlock) }),
+    `link+sync ${alias} (${label}) from ${fromBlock}`,
+  );
+}
 
 /// 409 = already exists -> treat as success so scripts are re-runnable.
 export async function idempotent<T>(p: Promise<T>, what: string): Promise<void> {

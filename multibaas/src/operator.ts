@@ -6,6 +6,8 @@
 //   npm run operator -- verify <address> <法人番号> "<company name>"
 //   npm run operator -- freeze <invoiceId> <true|false>
 //   npm run operator -- default <invoiceId>
+//   npm run operator -- rate <debtor> <grade 1..5>      (CreditRiskModel: reprices all the debtor's invoices)
+//   npm run operator -- base <bps>                      (CreditRiskModel base rate)
 //   npm run operator -- wallets
 import * as MultiBaas from '@curvegrid/multibaas-sdk';
 import { createHash } from 'node:crypto';
@@ -23,9 +25,9 @@ const [cmd, ...args] = process.argv.slice(2);
 /// Deterministic hash of the corporate number so the raw 法人番号 never goes on-chain.
 const corpIdHash = (corpNumber: string) => '0x' + createHash('sha256').update(`corp:${corpNumber.trim()}`).digest('hex');
 
-async function send(method: string, fnArgs: unknown[]) {
+async function send(method: string, fnArgs: unknown[], alias: string = LABELS.registry) {
   if (hsmAddress) {
-    const res = await contracts.callContractFunction(LABELS.registry, LABELS.registry, method, {
+    const res = await contracts.callContractFunction(alias, alias, method, {
       args: fnArgs as any[],
       from: hsmAddress,
       signAndSubmit: true,
@@ -37,7 +39,7 @@ async function send(method: string, fnArgs: unknown[]) {
   if (!operatorPk) throw new Error('Set MB_HSM_ADDRESS (Cloud Wallet) or OPERATOR_PK (local operator key) in multibaas/.env');
   const account = privateKeyToAccount(operatorPk);
   // 1. MultiBaas builds the transaction (ABI encoding, nonce, gas, fees).
-  const res = await contracts.callContractFunction(LABELS.registry, LABELS.registry, method, { args: fnArgs as any[], from: account.address });
+  const res = await contracts.callContractFunction(alias, alias, method, { args: fnArgs as any[], from: account.address });
   const result = res.data.result as any;
   if (result.kind !== 'TransactionToSignResponse') throw new Error(`expected a transaction, got ${result.kind}`);
   const tx = result.tx as MultiBaas.TransactionToSignTx;
@@ -76,6 +78,12 @@ switch (cmd) {
   case 'default':
     await send('markDefault', [args[0]]);
     break;
+  case 'rate':
+    await send('rate', [args[0], Number(args[1])], LABELS.risk);
+    break;
+  case 'base':
+    await send('setBaseRate', [Number(args[0])], LABELS.risk);
+    break;
   default:
-    console.log('usage: operator wallets | verify <addr> <corpNumber> <name> | freeze <id> <true|false> | default <id>');
+    console.log('usage: operator wallets | verify <addr> <corpNumber> <name> | freeze <id> <true|false> | default <id> | rate <debtor> <grade> | base <bps>');
 }

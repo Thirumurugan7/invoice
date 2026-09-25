@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, existsSync, copyFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const names = { registry: 'InvoiceRegistry', hook: 'MaturityCurveHook', market: 'TegataMarket', token: 'InvoiceToken', jpyc: 'MockJPYC', customRevert: 'CustomRevert', hooks: 'Hooks' };
+const names = { registry: 'InvoiceRegistry', risk: 'CreditRiskModel', hook: 'MaturityCurveHook', market: 'TegataMarket', token: 'InvoiceToken', jpyc: 'MockJPYC', customRevert: 'CustomRevert', hooks: 'Hooks' };
 const abis = {};
 for (const [k, n] of Object.entries(names)) {
   const f = resolve(root, `out/${n}.sol/${n}.json`);

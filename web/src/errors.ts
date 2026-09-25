@@ -1,7 +1,7 @@
 import { BaseError, ContractFunctionRevertedError, decodeErrorResult, type Hex } from 'viem';
 import { ABI } from './chain';
 
-const ALL_ERRORS = [...ABI.registry, ...ABI.hook, ...ABI.market, ...ABI.token, ...ABI.jpyc, ...ABI.customRevert, ...ABI.hooks].filter(
+const ALL_ERRORS = [...ABI.registry, ...ABI.risk, ...ABI.hook, ...ABI.market, ...ABI.token, ...ABI.jpyc, ...ABI.customRevert, ...ABI.hooks].filter(
   (x: any) => x.type === 'error',
 ) as any[];
 
@@ -13,8 +13,11 @@ const EXPLAIN: Record<string, (a: readonly unknown[]) => string> = {
   InvoiceNotAccepted: (a) => `Invoice #${a[0]} has not been accepted by the debtor yet.`,
   NotInvoicePool: () => 'Not an invoice/JPYC pool.',
   NotVerified: (a) => `${short(a[0])} is not a KYB-verified company.`,
+  NotRated: (a) => `${short(a[0])} has no credit grade yet — the operator must rate the debtor before invoices can be priced.`,
+  Expired: () => 'Transaction deadline passed.',
+  NotOwner: () => 'Not your bid position.',
   DuplicateInvoice: (a) => `This invoice document is already financed as invoice #${a[0]} (二重譲渡 blocked).`,
-  InvalidTerms: () => 'Invalid terms (face > 0, tenor ≥ 1 day, discount ≤ 50%, debtor ≠ supplier).',
+  InvalidTerms: () => 'Invalid terms (face > 0, tenor ≥ 1 day, debtor ≠ supplier).',
   NotDebtor: () => 'Only the invoice debtor can do this.',
   BadStatus: (a) => `Invoice is in the wrong state (${['None', 'Pending', 'Accepted', 'Rejected', 'Settled', 'Defaulted'][Number(a[0])]}).`,
   NotYetDefaultable: (a) => `Cannot mark default before maturity + 3-day grace (${new Date(Number(a[0]) * 1000).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })} JST).`,

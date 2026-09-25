@@ -16,7 +16,7 @@ const run = async (q: MultiBaas.EventQuery, max = Infinity) => {
   return rows.slice(0, max);
 };
 
-/// Every invoice ever registered (id, parties, face, maturity, discount).
+/// Every invoice ever registered (id, parties, face, maturity, debtor's rate at registration).
 export const registeredQuery: MultiBaas.EventQuery = {
   events: [
     {
@@ -27,7 +27,7 @@ export const registeredQuery: MultiBaas.EventQuery = {
         { type: 'input', inputIndex: 2, alias: 'debtor' },
         { type: 'input', inputIndex: 4, alias: 'face' },
         { type: 'input', inputIndex: 5, alias: 'maturity' },
-        { type: 'input', inputIndex: 6, alias: 'discount_bps' },
+        { type: 'input', inputIndex: 6, alias: 'rate_at_issue_bps' },
       ],
       filter: byAlias(LABELS.registry),
     },
@@ -73,10 +73,44 @@ export const tradesQuery: MultiBaas.EventQuery = {
   order: 'DESC',
 };
 
+/// Credit history: operator ratings and registry-recorded settlements/defaults (each reprices the debtor's invoices).
+export const creditQuery: MultiBaas.EventQuery = {
+    events: [
+      {
+        eventName: 'DebtorRated',
+        select: [
+          { type: 'input', inputIndex: 0, alias: 'debtor' },
+          { type: 'input', inputIndex: 1, alias: 'grade' },
+          { type: 'input', inputIndex: 2, alias: 'rate_bps' },
+          { type: 'triggered_at', alias: 'at' },
+        ],
+        filter: byAlias(LABELS.risk),
+      },
+      {
+        eventName: 'CreditEventRecorded',
+        select: [
+          { type: 'input', inputIndex: 0, alias: 'debtor' },
+          { type: 'input', inputIndex: 1, alias: 'kind' },
+          { type: 'input', inputIndex: 3, alias: 'rate_bps' },
+          { type: 'triggered_at', alias: 'at' },
+        ],
+        filter: byAlias(LABELS.risk),
+      },
+    ],
+    orderBy: 'at',
+    order: 'DESC',
+  };
+
 const yen = (wei: string | number) => `¥${(Number(BigInt(String(wei)) / 10n ** 16n) / 100).toLocaleString('ja-JP')}`;
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const [invoices, paid, trades, rejected] = await Promise.all([run(registeredQuery), run(paidQuery), run(tradesQuery, 20), run(rejectedQuery)]);
+  const [invoices, paid, trades, rejected, credit] = await Promise.all([
+    run(registeredQuery),
+    run(paidQuery),
+    run(tradesQuery, 20),
+    run(rejectedQuery),
+    run(creditQuery, 20),
+  ]);
   const rejectedIds = new Set(rejected.map((r) => String(r.id)));
   const paidById = new Map(paid.map((r) => [String(r.id), String(r.paid)]));
   console.log('Receivables book (MultiBaas Event Queries)\n');
@@ -86,10 +120,16 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const outstanding = isRejected ? 0n : BigInt(String(r.face)) - BigInt(paidById.get(String(r.id)) ?? '0');
     byDebtor.set(String(r.debtor), (byDebtor.get(String(r.debtor)) ?? 0n) + outstanding);
     const due = new Date(Number(r.maturity) * 1000).toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo' });
-    console.log(`#${r.id}  face ${yen(String(r.face))}  due ${due}  rate ${Number(r.discount_bps) / 100}%  outstanding ${yen(outstanding.toString())}${isRejected ? '  (rejected)' : ''}`);
+    console.log(`#${r.id}  face ${yen(String(r.face))}  due ${due}  rate@issue ${Number(r.rate_at_issue_bps) / 100}%  outstanding ${yen(outstanding.toString())}${isRejected ? '  (rejected)' : ''}`);
   }
   console.log('\nOutstanding by debtor:');
   for (const [debtor, amt] of byDebtor) console.log(`  ${debtor}  ${yen(amt.toString())}`);
+  const KIND = ['on-time settlement', 'late payment', 'DEFAULT'];
+  console.log(`\nCredit events (latest ${credit.length}):`);
+  for (const c of credit) {
+    const what = c.grade !== undefined && c.grade !== null ? `rated G${c.grade}` : KIND[Number(c.kind)];
+    console.log(`  ${c.debtor}  ${what}  -> rate ${Number(c.rate_bps) / 100}%  ${c.at}`);
+  }
   console.log(`\nLatest curve trades: ${trades.length}`);
   for (const t of trades) console.log(`  #${t.id}  price ${Number(BigInt(String(t.price))) / 1e18}  fair ${Number(BigInt(String(t.fair))) / 1e18}  dev ${t.deviation_bps}bps  ${t.at}`);
 }

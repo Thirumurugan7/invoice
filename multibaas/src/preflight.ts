@@ -14,6 +14,7 @@ console.log(`MultiBaas chain ${status.chainID} @ block ${status.blockNumber}`);
 
 for (const [label, name] of [
   [LABELS.registry, 'InvoiceRegistry'],
+  [LABELS.risk, 'CreditRiskModel'],
   [LABELS.hook, 'MaturityCurveHook'],
   [LABELS.market, 'TegataMarket'],
   [LABELS.invoiceToken, 'InvoiceToken'],

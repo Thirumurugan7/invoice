@@ -3,11 +3,10 @@
 import * as MultiBaas from '@curvegrid/multibaas-sdk';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { baseContract, config, deployment, idempotent, invoiceAlias, LABELS } from './client.ts';
+import { baseContract, config, deployment, idempotent, invoiceAlias, LABELS, linkAlias } from './client.ts';
 
 const cfg = config();
 const contracts = new MultiBaas.ContractsApi(cfg);
-const addresses = new MultiBaas.AddressesApi(cfg);
 const chains = new MultiBaas.ChainsApi(cfg);
 const webhooks = new MultiBaas.WebhooksApi(cfg);
 const d = deployment();
@@ -19,6 +18,7 @@ if (status.chainID !== d.chainId) throw new Error(`deployment chain ${d.chainId}
 // 1. ABI library
 for (const [label, name] of [
   [LABELS.registry, 'InvoiceRegistry'],
+  [LABELS.risk, 'CreditRiskModel'],
   [LABELS.hook, 'MaturityCurveHook'],
   [LABELS.market, 'TegataMarket'],
   [LABELS.invoiceToken, 'InvoiceToken'],
@@ -28,14 +28,9 @@ for (const [label, name] of [
 }
 
 // 2. Singletons: alias + link + sync events from the deployment block
-const link = async (alias: string, address: string, label: string, fromBlock: number) => {
-  await idempotent(addresses.setAddress({ alias, address }), `alias ${alias} -> ${address}`);
-  await idempotent(
-    contracts.linkAddressContract(alias, { label, version: '1.0', startingBlock: String(fromBlock) }),
-    `link+sync ${alias} (${label}) from ${fromBlock}`,
-  );
-};
+const link = linkAlias;
 await link(LABELS.registry, d.registry, LABELS.registry, d.startBlock);
+await link(LABELS.risk, d.risk, LABELS.risk, d.startBlock);
 await link(LABELS.hook, d.hook, LABELS.hook, d.startBlock);
 await link(LABELS.market, d.market, LABELS.market, d.startBlock);
 // The PoolManager is shared by every v4 pool on the chain: sync only from our deployment block.
