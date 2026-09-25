@@ -46,7 +46,7 @@ It starts at a discount and rises to 1.0 (face value) at maturity. The hook uses
 | Piece | What it does | MultiBaas feature |
 |---|---|---|
 | `link.ts` | Uploads ABIs; aliases and links the registry, hook, market and **Uniswap v4 PoolManager** with event sync from the deploy block; backfills one alias per invoice token; registers the webhook | Contracts, Addresses, event sync, Webhooks API |
-| `operator.ts` | KYB verification, freeze and mark-default, **signed by a Cloud Wallet (HSM)** via `callContractFunction(..., {from: HSM, signAndSubmit: true, nonceManagement: true})` | Cloud Wallets, Transaction Manager |
+| `operator.ts` | KYB verification, freeze and mark-default. **Default:** MultiBaas builds the unsigned tx (`callContractFunction`), the operator key signs locally, MultiBaas submits it (`submitSignedTransaction`). **Optional:** with `MB_HSM_ADDRESS`, a Cloud Wallet (HSM, e.g. Azure Key Vault) signs and submits (`signAndSubmit`) so the key never leaves the vault | REST API tx building, signed-tx submission, Cloud Wallets (optional) |
 | `webhook-server.ts` | Verifies `X-MultiBaas-Signature` = HMAC-SHA256(secret, body ‖ timestamp). On `InvoiceRegistered` it **auto-links the new invoice token** so holder Transfer events are indexed immediately, and notifies the debtor, holders and so on | Webhooks, contract linking |
 | `book.ts` + web **Book** tab | Receivables book: outstanding by debtor, maturity ladder, payments, curve trades | **Event Queries** (aggregations such as `add` grouped by id) |
 
@@ -90,7 +90,8 @@ OPERATOR=<Cloud Wallet address> forge script script/Deploy.s.sol --rpc-url $SEPO
   - The signed webhook was delivered through a tunnel. Its HMAC was verified, and on the real `InvoiceRegistered` for invoice #2 the receiver **auto-linked `tegata_invoice_2`**.
   - `npm run book` builds the receivables book from **Event Queries**.
   - The web Book tab reads from MultiBaas: CORS origin added through the Admin API.
-- **Not configured:** a MultiBaas Cloud Wallet (HSM). This deployment has no HSM set up (`listHsmWallets` returns `[]`), so the operator is currently the deployer key. `operator.ts` is ready for an Azure Key Vault–backed Cloud Wallet.
+- **Operator via MultiBaas (verified live):** `npm run operator -- verify …` had MultiBaas build the tx, the operator key sign locally, and MultiBaas submit it. Tx `0xe631d18db038f43ec3e2e564b0beb0cbfa3e28657ddfef8f4413e8bc105c948f` verified 大阪商事株式会社 on-chain.
+- **Cloud Wallet (HSM):** optional and not used in this demo, because it requires your own Azure Key Vault. In production, set `MB_HSM_ADDRESS` so the operator key never leaves the vault.
 
 MultiBaas findings (also useful for Curvegrid feedback):
 - `createContract` **requires `bin` (bytecode)**; registering an ABI alone fails with a DB not-null error.
