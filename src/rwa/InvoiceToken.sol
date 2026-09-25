@@ -1,0 +1,28 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.26;
+
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+/// @notice Fungible claim on one accepted invoice. 1 token (1e18 units) = ¥1 of face value, payable by the debtor
+///         at maturity. Minted on debtor acceptance, burned on redemption. Only the registry can mint/burn.
+contract InvoiceToken is ERC20 {
+    address public immutable registry;
+    uint256 public immutable invoiceId;
+
+    error NotRegistry();
+
+    constructor(string memory name_, string memory symbol_, uint256 invoiceId_) ERC20(name_, symbol_) {
+        registry = msg.sender;
+        invoiceId = invoiceId_;
+    }
+
+    function mint(address to, uint256 amount) external {
+        if (msg.sender != registry) revert NotRegistry();
+        _mint(to, amount);
+    }
+
+    function burn(address from, uint256 amount) external {
+        if (msg.sender != registry) revert NotRegistry();
+        _burn(from, amount);
+    }
+}

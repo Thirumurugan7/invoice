@@ -1,0 +1,21 @@
+{
+  "name": "tegata-multibaas",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "link": "tsx src/link.ts",
+    "operator": "tsx src/operator.ts",
+    "webhook": "tsx src/webhook-server.ts",
+    "book": "tsx src/book.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@curvegrid/multibaas-sdk": "1.1.1",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.4"
+  }
+}

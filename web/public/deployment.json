@@ -1,0 +1,11 @@
+{
+  "chainId": 11155111,
+  "demoInvoice": 1,
+  "hook": "0x84e5aA5cD807155BA3aC0BEaBcd1476dF3aB20C0",
+  "jpyc": "0xe43C092183C34B58eae69Ce7d7283d4F031C9fda",
+  "market": "0xD30F76Bb1FA540bD5Cb39bd4f906c1D88ba0B9e3",
+  "operator": "0xcBAee4793486f3Df37dbb584F5a3610ff581A614",
+  "poolManager": "0xE03A1074c86CFeDd5C142C4F04F1a1536e203543",
+  "registry": "0xcc749589c6da777E23253987D9a8acf5592F4C3d",
+  "startBlock": 11782082
+}
