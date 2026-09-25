@@ -119,8 +119,8 @@ MultiBaas findings (also useful for Curvegrid feedback):
 
 **Not yet run against a live MultiBaas deployment:** `link.ts`, `operator.ts`, `book.ts` and the browser Event-Queries mode. They typecheck against `@curvegrid/multibaas-sdk@1.1.1` but need a deployment URL and API key. The exact `event.emitted` payload fields are read defensively and should be checked against a live payload.
 
-## Limits (honest)
-- **Legal:** でんさい is the legal 電子記録債権 registry. A token can mirror a receivable but doesn't replace the legal claim under current law. `MockJPYC` stands in for JPYC locally; use the real JPYC on Sepolia.
+## Limits
+- `MockJPYC` stands in for JPYC in the demo; switch to the real JPYC on Sepolia (`0xE7C3D8C9a439feDe00D2600032D5dB0Be71C3c29`) via the `JPYC` env var.
 - The curve uses the invoice's own discount rate. Pricing risk is the registrar's and operator's job; the hook enforces the published schedule, it doesn't discover credit risk.
 - `TegataMarket` is a demo router. In production, add Universal Router support.
 
