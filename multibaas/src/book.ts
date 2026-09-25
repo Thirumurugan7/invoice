@@ -4,7 +4,17 @@ import { config, LABELS } from './client.ts';
 
 const api = new MultiBaas.EventQueriesApi(config());
 const byAlias = (alias: string): MultiBaas.EventQueryFilter => ({ fieldType: 'contract_address_alias', operator: 'equal', value: alias });
-const run = async (q: MultiBaas.EventQuery, limit = 50) => ((await api.executeArbitraryEventQuery(q, 0, limit)).data.result?.rows ?? []) as Record<string, any>[];
+/// MultiBaas Event Queries return at most 50 rows per request (51+ -> 400 "invalid request"), so page with offset.
+const PAGE = 50;
+const run = async (q: MultiBaas.EventQuery, max = Infinity) => {
+  const rows: Record<string, any>[] = [];
+  for (let offset = 0; rows.length < max; offset += PAGE) {
+    const page = ((await api.executeArbitraryEventQuery(q, offset, PAGE)).data.result?.rows ?? []) as Record<string, any>[];
+    rows.push(...page);
+    if (page.length < PAGE) break;
+  }
+  return rows.slice(0, max);
+};
 
 /// Every invoice ever registered (id, parties, face, maturity, discount).
 export const registeredQuery: MultiBaas.EventQuery = {

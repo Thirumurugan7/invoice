@@ -12,7 +12,16 @@ const byAlias = (alias: string): MultiBaas.EventQueryFilter => ({ fieldType: 'co
 export type MbBook = { registered: Record<string, any>[]; paid: Record<string, any>[]; trades: Record<string, any>[] };
 
 export async function fetchBookFromMultiBaas(): Promise<MbBook> {
-  const q = (query: MultiBaas.EventQuery, limit = 50) => api().executeArbitraryEventQuery(query, 0, limit).then((r) => (r.data.result?.rows ?? []) as Record<string, any>[]);
+  // MultiBaas returns at most 50 rows per request; page with offset.
+  const q = async (query: MultiBaas.EventQuery, max = Infinity) => {
+    const rows: Record<string, any>[] = [];
+    for (let offset = 0; rows.length < max; offset += 50) {
+      const page = ((await api().executeArbitraryEventQuery(query, offset, 50)).data.result?.rows ?? []) as Record<string, any>[];
+      rows.push(...page);
+      if (page.length < 50) break;
+    }
+    return rows.slice(0, max);
+  };
   const [registered, paid, trades] = await Promise.all([
     q({
       events: [

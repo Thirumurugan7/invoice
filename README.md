@@ -95,7 +95,7 @@ OPERATOR=<Cloud Wallet address> forge script script/Deploy.s.sol --rpc-url $SEPO
 
 MultiBaas findings (also useful for Curvegrid feedback):
 - `createContract` **requires `bin` (bytecode)**; registering an ABI alone fails with a DB not-null error.
-- Event Queries reject `limit=200` (400); `limit=50` works.
+- Event Queries return at most **50 rows per request** (51 or more gives `400 invalid request`), so `book.ts` and the web Book tab page through results with `offset`.
 - `bytes32` fields come back as byte arrays.
 - Both bare event names and full signatures work in `eventName`.
 
