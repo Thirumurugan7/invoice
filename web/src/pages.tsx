@@ -671,7 +671,45 @@ type AssistantMessage = { role: 'user' | 'assistant'; text: string; review?: Wor
 type AgentName = 'GPT' | 'Claude' | 'Gemini';
 type AgentStatus = Record<AgentName, boolean>;
 
-function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onClear: () => void }) {
+const reviewSchema = [
+  'Return only valid JSON with this exact shape:',
+  '{"nextAction":"one specific action starting with a verb","urgency":"Now|Today|This week","risk":"the single most important risk or blocker","reason":"one short evidence-based reason","owner":"the team or role that should act"}',
+  'Do not claim that an action has been executed. Keep every value concise and use only the supplied data.',
+].join('\n');
+
+function portfolioSnapshot(book: Book) {
+  return {
+    chainTime: jst(book.chainTime),
+    pricingBand: pct(Number(book.bandBps)),
+    baseRate: pct(book.baseRateBps),
+    account: {
+      name: book.me.name,
+      verified: book.me.verified,
+      approvedInvestor: book.me.approvedInvestor,
+      collateral: yen(book.me.collateral),
+      collateralRequired: yen(book.me.collateralRequired),
+      coverage: pct(book.me.coverageBps),
+    },
+    invoices: book.invoices.map((invoice) => ({
+      id: invoice.id,
+      reference: invoice.ref,
+      supplier: invoice.supplierName || short(invoice.supplier),
+      buyer: invoice.debtorName || short(invoice.debtor),
+      buyerGrade: invoice.debtorGrade,
+      faceValue: yen(invoice.face),
+      funded: yen(invoice.funded),
+      maturity: jst(invoice.maturity),
+      daysToMaturity: Math.ceil((invoice.maturity - book.chainTime) / 86400),
+      status: STATUS[invoice.status] || 'Unknown',
+      frozen: invoice.frozen,
+      tradable: invoice.tradable,
+      poolCreated: invoice.poolCreated,
+      fairPrice: price(invoice.fair),
+    })),
+  };
+}
+
+function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: WorkflowContext; onClear: () => void }) {
   const [provider, setProvider] = useState<AgentName>('GPT');
   const [draft, setDraft] = useState('');
   const [messages, setMessages] = useState<AssistantMessage[]>([]);
@@ -681,7 +719,25 @@ function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onC
   const [draggingOver, setDraggingOver] = useState(false);
   const [attachment, setAttachment] = useState<{ name: string; text: string }>();
   const panelRef = useRef<HTMLElement>(null);
-  const shortcuts = ['Review invoice risk', 'Prepare settlement report', 'Summarize investor bids'];
+  const snapshot = portfolioSnapshot(book);
+  const shortcuts = [
+    {
+      label: 'Portfolio review',
+      prompt: `Review this invoice portfolio. Prioritize the one issue that requires attention first.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema}`,
+    },
+    {
+      label: 'Funding recommendation',
+      prompt: `Review the open invoices and identify the single best action to improve funding. Consider maturity, funded amount, buyer grade, pricing band, tradability, and pool availability.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema}`,
+    },
+    {
+      label: 'Settlement monitor',
+      prompt: `Review settlement readiness across the invoices. Prioritize overdue or near-maturity exposure and recommend one action.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema}`,
+    },
+    {
+      label: 'Permission check',
+      prompt: `Review the account eligibility, collateral coverage, frozen invoices, and tradability flags. Recommend one compliance or permission action.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema}`,
+    },
+  ];
 
   useEffect(() => {
     fetch('/api/agents/status', { cache: 'no-store' })
@@ -691,7 +747,7 @@ function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onC
       .finally(() => setStatusReady(true));
   }, []);
 
-  const submit = async (text: string, workflow?: WorkflowContext) => {
+  const submit = async (text: string, workflow?: WorkflowContext, structuredLabel?: string) => {
     const clean = text.trim();
     if (!clean || loading) return;
     if (!status[provider]) {
@@ -700,7 +756,7 @@ function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onC
     }
     setMessages((current) => [...current, {
       role: 'user',
-      text: workflow ? `Review invoice #${workflow.invoiceId} and recommend the next best action.` : clean,
+      text: workflow ? `Review invoice #${workflow.invoiceId} and recommend the next best action.` : structuredLabel || clean,
     }]);
     setDraft('');
     setLoading(true);
@@ -718,7 +774,7 @@ function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onC
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'The assistant could not respond.');
       let review: WorkflowReview | undefined;
-      if (workflow) {
+      if (workflow || structuredLabel) {
         try {
           const json = String(result.reply).match(/\{[\s\S]*\}/)?.[0];
           const parsed = json ? JSON.parse(json) : undefined;
@@ -807,7 +863,11 @@ function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onC
               <span />{!statusReady ? 'Checking connection…' : status[provider] ? `${provider} subscription connected` : provider === 'Gemini' ? 'Gemini CLI installation required' : `${provider} sign-in required`}
             </div>
             <div className="assistant-shortcuts">
-              {shortcuts.map((label) => <button key={label} onClick={() => submit(label)}>{label}</button>)}
+              {shortcuts.map((shortcut) => (
+                <button key={shortcut.label} onClick={() => submit(shortcut.prompt, undefined, shortcut.label)} disabled={loading || !statusReady || !status[provider]}>
+                  {shortcut.label}
+                </button>
+              ))}
             </div>
           </div>
         ) : (
@@ -887,7 +947,7 @@ export function BookPage({ book, onViewAll }: Props) {
             {onViewAll && <button onClick={onViewAll}>View invoices</button>}
           </div>
         </div>
-        <AssistantPanel selected={selectedWorkflow} onClear={() => setSelectedWorkflow(undefined)} />
+        <AssistantPanel book={book} selected={selectedWorkflow} onClear={() => setSelectedWorkflow(undefined)} />
       </div>
       {mb && (
         <div className="grid">
