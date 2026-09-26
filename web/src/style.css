@@ -138,9 +138,9 @@ a { color: var(--foreground); text-underline-offset: 2px; }
 .acct { justify-self: end; }
 
 /* ---------------------------------------------------------------- header (page intro, below topbar) */
-.page-intro { margin: 36px 4px 30px; }
+.page-intro { margin: 22px 4px 16px; }
 .page-intro h1 { font-size: 27px; line-height: 1.25; }
-.page-intro p { max-width: 66ch; margin-top: 7px; line-height: 1.75; }
+.page-intro p { max-width: 76ch; margin-top: 5px; line-height: 1.55; }
 
 .acct { display: flex; gap: 8px; align-items: center; }
 .wallet-chip {
@@ -162,7 +162,7 @@ select {
   font: 600 13px var(--font);
 }
 
-.warpbar { display: flex; gap: 10px; align-items: center; margin: 18px 2px 0; flex-wrap: wrap; }
+.warpbar { display: flex; gap: 10px; align-items: center; margin: 12px 2px 0; flex-wrap: wrap; }
 
 /* ---------------------------------------------------------------- surfaces */
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; margin-top: 18px; }
@@ -268,39 +268,50 @@ td.actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .legend i.ink { background: var(--ink); } .legend i.negative { background: var(--negative); }
 
 /* ---------------------------------------------------------------- liquidity schedule */
-.timeline-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-bottom: 44px; }
-.timeline-metrics div { min-height: 96px; display: flex; flex-direction: column; justify-content: center; padding: 20px 22px; border-radius: var(--r-inner); background: rgb(255 255 255 / 0.5); }
-.timeline-metrics span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
-.timeline-metrics b { font-size: 23px; line-height: 1.2; font-weight: 650; font-variant-numeric: tabular-nums; }
-.schedule-scroll { overflow-x: auto; padding: 8px 0 12px; }
-.schedule { --label-width: 205px; position: relative; width: 100%; min-width: 620px; min-height: 230px; display: grid; align-content: start; grid-template-columns: var(--label-width) 1fr; }
-.schedule-corner { display: flex; align-items: flex-end; padding: 0 20px 16px 0; font-size: 15px; font-weight: 650; }
-.schedule-dates { display: grid; grid-template-columns: repeat(var(--calendar-days), 1fr); gap: 10px; }
-.schedule-dates div { min-width: 48px; padding: 10px 3px; border-radius: 13px; background: rgb(255 255 255 / 0.58); color: var(--muted); text-align: center; }
+.schedule-panel { padding: 20px 18px 16px; overflow: hidden; }
+.schedule-panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 0 2px 18px; }
+.schedule-panel-head h2 { margin: 0; font-size: 28px; line-height: 1.15; letter-spacing: 0; }
+.schedule-panel-head > div:first-child > span { display: block; margin-top: 7px; color: var(--muted); font-size: 13px; }
+.schedule-controls { display: flex; gap: 8px; }
+.schedule-controls button { padding: 9px 14px; white-space: nowrap; }
+.schedule-scroll { overflow-x: auto; padding: 0 0 4px; }
+.schedule { --label-width: 195px; position: relative; width: max-content; min-width: 100%; display: grid; align-content: start; grid-template-columns: var(--label-width) max-content; }
+.schedule-corner { display: flex; align-items: flex-end; padding: 0 16px 10px 0; font-size: 14px; font-weight: 650; }
+.schedule-dates { display: grid; grid-template-columns: repeat(var(--calendar-days), 44px); gap: 5px; }
+.schedule-dates div { width: 44px; padding: 6px 2px; border-radius: 10px; background: rgb(255 255 255 / 0.68); color: var(--muted); text-align: center; }
 .schedule-dates div.weekend { background: var(--paper-sunk); }
 .schedule-dates div.today { color: white; background: #3081ef; box-shadow: 0 8px 18px -10px #3081ef; }
-.schedule-dates span, .schedule-dates b { display: block; font-size: 11px; line-height: 1.25; }
-.schedule-dates b { margin-top: 5px; font-size: 15px; }
-.schedule-row { grid-column: 1 / -1; display: grid; grid-template-columns: var(--label-width) 1fr; min-height: 108px; margin-top: 14px; }
-.schedule-who { display: flex; align-items: center; gap: 14px; margin-right: 18px; padding: 16px; border-radius: 17px; background: rgb(255 255 255 / 0.68); box-shadow: 0 5px 14px -12px rgb(19 19 21 / 0.4); }
+.schedule-dates span, .schedule-dates b { display: block; font-size: 10px; line-height: 1.2; }
+.schedule-dates b { margin-top: 3px; font-size: 13px; }
+.schedule-row { grid-column: 1 / -1; display: grid; grid-template-columns: var(--label-width) max-content; min-height: 62px; margin-top: 6px; }
+.schedule-who { width: 184px; display: flex; align-items: center; gap: 9px; margin-right: 11px; padding: 7px 10px; border-radius: 12px; background: rgb(255 255 255 / 0.78); box-shadow: var(--lift); }
 .schedule-who > span:last-child { min-width: 0; }
 .schedule-who b, .schedule-who small { display: block; overflow: hidden; text-overflow: ellipsis; }
-.schedule-who b { max-height: 38px; font-size: 14px; line-height: 1.35; }
+.schedule-who b { font-size: 12.5px; line-height: 1.3; white-space: nowrap; }
 .schedule-who small { white-space: nowrap; }
-.schedule-who small { margin-top: 5px; color: var(--muted); font-size: 11px; }
-.invoice-avatar { display: grid; flex: 0 0 46px; width: 46px; height: 46px; place-items: center; border-radius: 50%; color: var(--mint-ink); background: var(--mint); font-weight: 800; }
-.schedule-track { position: relative; display: grid; grid-template-columns: repeat(var(--calendar-days), 1fr); gap: 10px; }
-.schedule-track > i { grid-row: 1; min-width: 48px; border-radius: 13px; background: rgb(255 255 255 / 0.42); }
+.schedule-who small { margin-top: 2px; color: var(--muted); font-size: 10px; }
+.invoice-avatar { display: grid; flex: 0 0 34px; width: 34px; height: 34px; place-items: center; border-radius: 50%; color: var(--mint-ink); background: var(--mint); font-weight: 800; }
+.invoice-avatar.purple { color: var(--lilac-ink); background: var(--lilac); }
+.invoice-avatar.blue { color: #285f9f; background: #d7e8fb; }
+.schedule-track { position: relative; display: grid; grid-template-columns: repeat(var(--calendar-days), 44px); gap: 5px; }
+.schedule-track > i { grid-row: 1; width: 44px; border-radius: 10px; background: rgb(255 255 255 / 0.5); }
 .schedule-track > i.weekend { background: repeating-linear-gradient(135deg, #d8dbe0, #d8dbe0 4px, #eceeeb 4px, #eceeeb 9px); }
-.schedule-event { z-index: 2; grid-row: 1; align-self: center; min-width: 0; height: 70px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 20px; border-radius: 17px; color: var(--mint-ink); background: linear-gradient(100deg, #73dbba, #b8eddd); box-shadow: 0 10px 20px -14px var(--mint-ink); overflow: hidden; }
-.schedule-event.pending { color: var(--lilac-ink); background: linear-gradient(100deg, #b693f2, #ded0f3); }
-.schedule-event span, .schedule-event b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.schedule-event b { font-size: 14px; }
-.today-line { position: absolute; z-index: 3; top: 68px; bottom: 0; left: calc(var(--label-width) + (100% - var(--label-width)) / var(--calendar-days) / 2); border-left: 2px dashed #3081ef; pointer-events: none; }
-.calendar-legend { display: flex; justify-content: flex-end; gap: 20px; margin-top: 18px; color: var(--muted); font-size: 12px; }
-.calendar-legend span { display: inline-flex; align-items: center; gap: 6px; }
-.calendar-legend i { width: 9px; height: 9px; border-radius: 3px; background: var(--mint); }
-.calendar-legend i.pending { background: var(--butter); }
+.schedule-event { z-index: 2; grid-row: 1; align-self: center; min-width: 0; height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 12px; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 20px -14px rgb(19 19 21 / 0.45); }
+.schedule-event.green { color: #075d3d; background: linear-gradient(100deg, #16c77c, #8de6c0); }
+.schedule-event.purple { color: white; background: linear-gradient(100deg, #8145ef, #bd91ff); }
+.schedule-event.blue { color: #245785; background: linear-gradient(100deg, #b5d6fa, #76aef2); }
+.schedule-event span, .schedule-event b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.schedule-event b { padding: 3px 7px; border-radius: 6px; color: var(--foreground); background: rgb(255 255 255 / 0.76); font-size: 9px; }
+.today-line { position: absolute; z-index: 3; top: 45px; bottom: 0; border-left: 2px dashed #3081ef; pointer-events: none; }
+
+@media (max-width: 1200px) {
+  .topbar { grid-template-columns: auto minmax(230px, 1fr) auto auto; padding: 12px 14px; }
+  .topbar .global-search { grid-column: 1 / -1; grid-row: 2; }
+  .page-intro { margin: 12px 4px 10px; }
+  .page-intro h1 { font-size: 22px; }
+  .page-intro p { display: none; }
+  .warpbar { margin-top: 8px; }
+}
 
 /* ---------------------------------------------------------------- list panels */
 .list-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; }

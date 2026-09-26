@@ -446,82 +446,80 @@ export function ActivityPage({ book }: Props) {
   );
 }
 
-const CALENDAR_DAYS = 35;
-const CALENDAR_COLUMNS = 8;
+const CALENDAR_DAYS = 17;
 
 function MaturityBoard({ book }: { book: Book }) {
+  const [showAll, setShowAll] = useState(false);
   const open = book.invoices.filter((i) => i.status === 1 || i.status === 2);
-  const calendar = Array.from({ length: CALENDAR_COLUMNS }, (_, index) => {
-    const offset = Math.round(index * (CALENDAR_DAYS - 1) / (CALENDAR_COLUMNS - 1));
-    const timestamp = book.chainTime + offset * 86400;
+  const focus = [...open].sort((a, b) => a.maturity - b.maturity)[0];
+  const columnCount = showAll ? 30 : CALENDAR_DAYS;
+  const todayIndex = 7;
+  const startTime = book.chainTime - todayIndex * 86400;
+  const calendar = Array.from({ length: columnCount }, (_, index) => {
+    const timestamp = startTime + index * 86400;
     const date = new Date(timestamp * 1000);
     return {
       index,
-      offset,
       day: date.toLocaleDateString('en-US', { timeZone: 'Asia/Tokyo', day: 'numeric' }),
       weekday: date.toLocaleDateString('en-US', { timeZone: 'Asia/Tokyo', weekday: 'short' }),
       weekend: ['Sat', 'Sun'].includes(date.toLocaleDateString('en-US', { timeZone: 'Asia/Tokyo', weekday: 'short' })),
     };
   });
-  const total = open.reduce((sum, inv) => sum + inv.face, 0n);
-  const funded = open.reduce((sum, inv) => sum + inv.funded, 0n);
-  const nextDue = [...open].sort((a, b) => a.maturity - b.maturity)[0];
+  const dueIndex = focus ? Math.min(columnCount - 1, Math.max(0, Math.round((focus.maturity - startTime) / 86400))) : todayIndex + 5;
+  const lanes = focus ? [
+    { key: 'registered', name: focus.supplierName || short(focus.supplier), meta: `Invoice #${focus.id}`, initial: 'I', start: 0, end: 4, tone: 'purple', label: 'Invoice registered', status: 'Verified' },
+    { key: 'buyer', name: focus.debtorName || short(focus.debtor), meta: `Buyer · G${focus.debtorGrade}`, initial: 'B', start: 3, end: 7, tone: 'blue', label: 'Buyer review', status: focus.status === 1 ? 'Pending' : 'Accepted' },
+    { key: 'bids', name: 'Investor marketplace', meta: `${pct(Number(book.bandBps))} pricing band`, initial: 'M', start: 5, end: 11, tone: 'green', label: 'Investor bids', status: 'Open' },
+    { key: 'liquidity', name: 'Liquidity desk', meta: `${yen(focus.face)} face value`, initial: 'L', start: 8, end: 14, tone: 'purple', label: 'Funding window', status: focus.funded > 0n ? 'Funded' : 'Ready' },
+    { key: 'settlement', name: 'Settlement account', meta: `Due ${jst(focus.maturity).split(' ')[0]}`, initial: 'S', start: Math.max(0, dueIndex - 3), end: Math.min(columnCount - 1, dueIndex + 2), tone: 'green', label: 'Settlement', status: dueIndex <= todayIndex + 2 ? 'Due soon' : 'Scheduled' },
+  ] : [];
 
   return (
-    <section className="panel">
-      <div className="panel-title">
+    <section className="panel schedule-panel">
+      <div className="schedule-panel-head">
         <div>
-          <span className="eyebrow">Liquidity outlook</span>
-          <h3>Invoice liquidity calendar</h3>
+          <h2>Invoice liquidity calendar</h2>
+          <span>Workflow stages</span>
         </div>
-        <span className="muted small-text">Next {CALENDAR_DAYS} days</span>
-      </div>
-      <div className="timeline-metrics">
-        <div><span>Open face value</span><b>{yen(total)}</b></div>
-        <div><span>Liquidity received</span><b>{yen(funded)}</b></div>
-        <div><span>Next settlement</span><b>{nextDue ? `${Math.ceil(daysLeft(nextDue, book.chainTime))} ${Math.ceil(daysLeft(nextDue, book.chainTime)) === 1 ? 'day' : 'days'}` : '—'}</b></div>
+        <div className="schedule-controls">
+          <button className="ghost">{jst(book.chainTime).split(' ')[0]}</button>
+          <button className="ghost">Filter</button>
+          <button className="ghost" onClick={() => setShowAll((value) => !value)}>{showAll ? 'Compact view' : 'View all'}</button>
+        </div>
       </div>
       {open.length === 0 ? (
         <p className="empty-state">No open invoices on the books right now.</p>
       ) : (
         <div className="schedule-scroll" aria-label="Invoice liquidity calendar">
-          <div className="schedule" style={{ ['--calendar-days' as any]: CALENDAR_COLUMNS }}>
-            <div className="schedule-corner">Invoices</div>
+          <div className="schedule" style={{ ['--calendar-days' as any]: columnCount }}>
+            <div className="schedule-corner">Workflow</div>
             <div className="schedule-dates">
               {calendar.map((date) => (
-                <div className={`${date.weekend ? 'weekend ' : ''}${date.index === 0 ? 'today' : ''}`} key={date.index}>
+                <div className={`${date.weekend ? 'weekend ' : ''}${date.index === todayIndex ? 'today' : ''}`} key={date.index}>
                   <span>{date.weekday}</span><b>{date.day}</b>
                 </div>
               ))}
             </div>
-            {open.map((inv) => {
-              const dueDays = Math.min(CALENDAR_DAYS - 1, Math.max(0, Math.ceil(daysLeft(inv, book.chainTime))));
-              const due = Math.round(dueDays * (CALENDAR_COLUMNS - 1) / (CALENDAR_DAYS - 1));
-              const start = Math.max(0, due - 2);
-              const span = Math.min(4, CALENDAR_COLUMNS - start);
-              return (
-                <div className="schedule-row" key={inv.id}>
+            {lanes.map((lane) => (
+                <div className="schedule-row" key={lane.key}>
                   <div className="schedule-who">
-                    <span className="invoice-avatar">{(inv.debtorName || 'B').charAt(0)}</span>
-                    <span><b>{inv.debtorName || short(inv.debtor)}</b><small>#{inv.id} · G{inv.debtorGrade}</small></span>
+                    <span className={`invoice-avatar ${lane.tone}`}>{lane.initial}</span>
+                    <span><b>{lane.name}</b><small>{lane.meta}</small></span>
                   </div>
                   <div className="schedule-track">
                     {calendar.map((date) => <i className={date.weekend ? 'weekend' : ''} key={date.index} />)}
                     <div
-                      className={inv.status === 1 || inv.frozen ? 'schedule-event pending' : 'schedule-event funded'}
-                      style={{ gridColumn: `${start + 1} / span ${span}` }}
-                      title={`Invoice #${inv.id} · ${yen(inv.face)} · due ${jst(inv.maturity)}`}
+                      className={`schedule-event ${lane.tone}`}
+                      style={{ gridColumn: `${lane.start + 1} / ${lane.end + 2}` }}
                     >
-                      <span>{inv.status === 1 ? 'Awaiting confirmation' : 'Settlement'}</span>
-                      <b>{yen(inv.face)}</b>
+                      <span>{lane.label}</span>
+                      <b>{lane.status}</b>
                     </div>
                   </div>
                 </div>
-              );
-            })}
-            <div className="today-line" />
+            ))}
+            <div className="today-line" style={{ left: 195 + todayIndex * 49 + 22 }} />
           </div>
-          <div className="calendar-legend"><span><i className="funded" /> Funded</span><span><i className="pending" /> Awaiting confirmation</span></div>
         </div>
       )}
     </section>
