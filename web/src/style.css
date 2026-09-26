@@ -321,6 +321,10 @@ td.actions { display: flex; gap: 6px; flex-wrap: wrap; }
 /* ---------------------------------------------------------------- list panels */
 .list-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; }
 .list-row + .list-row { border-top: 1px solid var(--bone); }
+.action-row { width: 100%; border-radius: 0; color: inherit; background: transparent; box-shadow: none; text-align: left; }
+.action-row:hover { padding-left: 8px; color: inherit; background: rgb(255 255 255 / 0.56); }
+.action-row:focus-visible { outline: 2px solid #3081ef; outline-offset: 2px; }
+.action-arrow { flex: none; color: var(--muted); font-size: 18px; }
 .list-row .who { flex: 1; min-width: 0; }
 .list-row .who b { display: block; font-size: 13.5px; }
 .list-row .who .muted { font-size: 12px; }

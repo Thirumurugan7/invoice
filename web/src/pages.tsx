@@ -506,6 +506,22 @@ const workflowPrompt = (item: WorkflowContext) => [
   'Keep every value concise and practical for a finance operator. Do not include markdown or additional keys.',
 ].join('\n');
 
+function invoiceWorkflowContext(invoice: InvoiceRow, book: Book, stage: string, status: string): WorkflowContext {
+  return {
+    key: `invoice-${invoice.id}`,
+    invoiceId: String(invoice.id),
+    reference: invoice.ref || 'No reference',
+    stage,
+    status,
+    supplier: invoice.supplierName || short(invoice.supplier),
+    buyer: invoice.debtorName || short(invoice.debtor),
+    buyerGrade: `Grade ${invoice.debtorGrade}`,
+    faceValue: yen(invoice.face),
+    funded: yen(invoice.funded),
+    dueDate: jst(invoice.maturity),
+  };
+}
+
 function MaturityBoard({ book, selected, onSelect }: { book: Book; selected?: WorkflowContext; onSelect: (item: WorkflowContext) => void }) {
   const [showAll, setShowAll] = useState(false);
   const [filter, setFilter] = useState<'open' | 'pending' | 'funded' | 'review'>('open');
@@ -550,19 +566,7 @@ function MaturityBoard({ book, selected, onSelect }: { book: Book; selected?: Wo
       status: isOverdue ? 'Overdue' : `${Math.max(0, Math.ceil((invoice.maturity - book.chainTime) / 86400))}d to due`,
     };
   });
-  const contextFor = (lane: typeof lanes[number]): WorkflowContext => ({
-    key: lane.key,
-    invoiceId: String(lane.invoice.id),
-    reference: lane.invoice.ref || 'No reference',
-    stage: lane.label,
-    status: lane.status,
-    supplier: lane.invoice.supplierName || short(lane.invoice.supplier),
-    buyer: lane.invoice.debtorName || short(lane.invoice.debtor),
-    buyerGrade: `Grade ${lane.invoice.debtorGrade}`,
-    faceValue: yen(lane.invoice.face),
-    funded: yen(lane.invoice.funded),
-    dueDate: jst(lane.invoice.maturity),
-  });
+  const contextFor = (lane: typeof lanes[number]) => invoiceWorkflowContext(lane.invoice, book, lane.label, lane.status);
 
   return (
     <section className="panel schedule-panel">
@@ -645,7 +649,7 @@ function MaturityBoard({ book, selected, onSelect }: { book: Book; selected?: Wo
   );
 }
 
-function UpcomingSettlements({ book }: { book: Book }) {
+function UpcomingSettlements({ book, onSelect }: { book: Book; onSelect: (item: WorkflowContext) => void }) {
   const rows = book.invoices
     .filter((i) => i.status === 2)
     .sort((a, b) => a.maturity - b.maturity)
@@ -659,14 +663,15 @@ function UpcomingSettlements({ book }: { book: Book }) {
         rows.map((inv) => {
           const d = daysLeft(inv, book.chainTime);
           return (
-            <div className="list-row" key={inv.id}>
+            <button className="list-row action-row" key={inv.id} onClick={() => onSelect(invoiceWorkflowContext(inv, book, 'Settlement readiness', `${d.toFixed(0)} days to maturity`))}>
               <div className="who">
                 <b>{inv.debtorName || short(inv.debtor)}</b>
                 <span className="muted">#{inv.id} {inv.ref} · due {jst(inv.maturity)}</span>
               </div>
               <span className="amt">{yen(inv.face - inv.funded)}</span>
               <span className={`pill-days${d <= 3 ? ' soon' : ''}`}>{d < 1 ? '<1d' : `${d.toFixed(0)}d`}</span>
-            </div>
+              <span className="action-arrow" aria-hidden="true">→</span>
+            </button>
           );
         })
       )}
@@ -674,22 +679,47 @@ function UpcomingSettlements({ book }: { book: Book }) {
   );
 }
 
-function NeedsAction({ book }: { book: Book }) {
-  const rows = book.invoices.filter((i) => i.status === 1 || i.frozen).slice(0, 6);
+function DashboardActions({ book, s, onSelect }: { book: Book; s: Session; onSelect: (item: WorkflowContext) => void }) {
+  const role = workspaceRole(book, s);
+  const me = s.account.toLowerCase();
+  const rows = role === 'Capital'
+    ? book.invoices
+      .filter((invoice) => invoice.status === 2 && invoice.poolCreated && invoice.tradable)
+      .sort((a, b) => a.debtorGrade - b.debtorGrade || a.maturity - b.maturity)
+      .slice(0, 6)
+      .map((invoice) => ({ invoice, label: 'Review investment', detail: `${price(invoice.fair)} · G${invoice.debtorGrade} · ${Math.ceil(daysLeft(invoice, book.chainTime))}d` }))
+    : role === 'Seller'
+      ? book.invoices
+        .filter((invoice) => invoice.supplier.toLowerCase() === me && (invoice.status === 1 || invoice.status === 2))
+        .slice(0, 6)
+        .map((invoice) => ({
+          invoice,
+          label: invoice.status === 1 ? 'Follow up with buyer' : invoice.poolCreated ? 'Review funding' : 'Open investor bidding',
+          detail: invoice.status === 1 ? 'Awaiting acceptance' : `${yen(invoice.face - invoice.funded)} available`,
+        }))
+      : book.invoices
+        .filter((invoice) => invoice.status === 1 || invoice.frozen || (invoice.status === 2 && book.chainTime > invoice.maturity))
+        .slice(0, 6)
+        .map((invoice) => ({
+          invoice,
+          label: invoice.frozen ? 'Resolve review hold' : invoice.status === 1 ? 'Review pending invoice' : 'Review overdue exposure',
+          detail: invoice.frozen ? 'Trading paused' : invoice.status === 1 ? 'Buyer confirmation pending' : 'Past maturity',
+        }));
   return (
     <section className="panel">
-      <div className="panel-title"><h3>Needs your action</h3></div>
+      <div className="panel-title"><h3>{role === 'Capital' ? 'What to bid on' : 'Needs your action'}</h3><span className="muted small-text">{role} queue</span></div>
       {rows.length === 0 ? (
-        <p className="empty-state">Nothing needs a hand — every invoice is either settling or on the curve.</p>
+        <p className="empty-state">No actionable items right now.</p>
       ) : (
-        rows.map((inv) => (
-          <div className="list-row" key={inv.id}>
+        rows.map(({ invoice, label, detail }) => (
+          <button className="list-row action-row" key={invoice.id} onClick={() => onSelect(invoiceWorkflowContext(invoice, book, label, detail))}>
             <div className="who">
-              <b>{inv.supplierName || short(inv.supplier)} → {inv.debtorName || short(inv.debtor)}</b>
-              <span className="muted">#{inv.id} {inv.ref} · {yen(inv.face)}</span>
+              <b>{label}</b>
+              <span className="muted">#{invoice.id} {invoice.ref} · {invoice.debtorName || short(invoice.debtor)}</span>
             </div>
-            <span className="badge butter">{inv.frozen ? 'Frozen' : 'Awaiting acceptance'}</span>
-          </div>
+            <span className="badge butter">{detail}</span>
+            <span className="action-arrow" aria-hidden="true">→</span>
+          </button>
         ))
       )}
     </section>
@@ -1111,6 +1141,7 @@ export function BookPage({ dep, s, book, send, onViewAll }: Props) {
   const [mb, setMb] = useState<MbBook>();
   const [mbErr, setMbErr] = useState<string>();
   const [selectedWorkflow, setSelectedWorkflow] = useState<WorkflowContext>();
+  useEffect(() => setSelectedWorkflow(undefined), [s.account]);
   useEffect(() => {
     if (multibaasEnabled) fetchBookFromMultiBaas().then(setMb).catch((e) => setMbErr(String(e?.message ?? e)));
   }, [book.chainTime]);
@@ -1129,8 +1160,14 @@ export function BookPage({ dep, s, book, send, onViewAll }: Props) {
         }}
       />
       <div className="grid">
-        <UpcomingSettlements book={book} />
-        <NeedsAction book={book} />
+        <UpcomingSettlements book={book} onSelect={(item) => {
+          setSelectedWorkflow(item);
+          window.setTimeout(() => document.getElementById('ai-operations-desk')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 0);
+        }} />
+        <DashboardActions book={book} s={s} onSelect={(item) => {
+          setSelectedWorkflow(item);
+          window.setTimeout(() => document.getElementById('ai-operations-desk')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 0);
+        }} />
         <div className="hero">
           <span className="tag">Outstanding</span>
           <span><span className="figure">{yen(outstanding)}</span></span>
