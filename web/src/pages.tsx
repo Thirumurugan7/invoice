@@ -36,48 +36,82 @@ export function SupplierPage({ dep, s, book, send }: Props) {
   const [docHash, setDocHash] = useState<`0x${string}`>();
   const [fileName, setFileName] = useState('');
   const [ref, setRef] = useState('');
+  const [documentError, setDocumentError] = useState<string>();
   const mine = book.invoices.filter((i) => i.supplier.toLowerCase() === s.account.toLowerCase() || i.myTokens > 0n);
+  const registered = mine.find((invoice) => invoice.ref === ref);
+  const duplicate = book.invoices.some((invoice) => invoice.ref === ref && invoice.supplier.toLowerCase() !== s.account.toLowerCase());
+  const validFace = Number(face) > 0;
+  const validDays = Number.isInteger(Number(days)) && Number(days) >= 7;
+  const ready = Boolean(docHash && ref.trim() && isAddress(debtor) && validFace && validDays && book.me.verified && !duplicate && !registered);
+  const prefillFromDocument = (text: string) => {
+    const reference = text.match(/(?:invoice|reference|invoice\s*(?:number|no\.?|#))\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{3,})/i)?.[1];
+    const wallet = text.match(/0x[a-fA-F0-9]{40}/)?.[0];
+    const amount = text.match(/(?:face\s*value|total|amount\s*due|invoice\s*amount)\s*[:¥$]?\s*(?:JPY|JPYC)?\s*([0-9][0-9,]*)/i)?.[1];
+    const due = text.match(/(?:due\s*date|payment\s*due|maturity)\s*[:\s]+(\d{4}[-/]\d{1,2}[-/]\d{1,2})/i)?.[1];
+    if (reference && !ref) setRef(reference);
+    if (wallet && !debtor) setDebtor(wallet);
+    if (amount) setFace(amount.replace(/,/g, ''));
+    if (due) {
+      const dueTime = new Date(`${due.replaceAll('/', '-')}T00:00:00+09:00`).getTime() / 1000;
+      if (Number.isFinite(dueTime)) setDays(String(Math.max(7, Math.ceil((dueTime - book.chainTime) / 86400))));
+    }
+  };
   return (
     <div className="grid">
-      <section className="card">
+      <section className="card invoice-intake">
         <h3>Upload invoice for liquidity</h3>
-        <p className="muted">{book.me.verified ? `Permission policy active for ${book.me.name}` : 'Under review — an operator must approve this company before funding.'}</p>
+        <p className="muted">{book.me.verified ? `Permission policy active for ${book.me.name}` : 'Company approval is required before an invoice can be registered on-chain.'}</p>
         <label className="field">
           <span>Invoice PDF</span>
           <input
             type="file"
+            accept=".pdf,.txt,application/pdf,text/plain"
             onChange={async (e) => {
               const f = e.target.files?.[0];
               if (f) {
+                setDocumentError(undefined);
                 setFileName(f.name);
                 if (!ref) setRef(f.name.replace(/\.[^.]+$/, '').replace(/^invoice-/i, ''));
-                setDocHash(await sha256File(f));
+                try {
+                  const [hash, text] = await Promise.all([sha256File(f), readAssistantAttachment(f)]);
+                  setDocHash(hash);
+                  prefillFromDocument(text);
+                } catch (error: any) {
+                  setDocHash(undefined);
+                  setDocumentError(String(error?.message ?? 'Could not read this invoice.'));
+                }
               }
             }}
           />
         </label>
         {docHash && <p className="muted mono">{fileName}: {short(docHash)}</p>}
+        {documentError && <p className="attachment-error" role="alert">{documentError}</p>}
         <F label="Invoice number (請求書番号)" value={ref} set={setRef} ph="SKR-2026-0926-001" />
         <F label="Buyer company wallet" value={debtor} set={setDebtor} ph="0x… approved company" />
         <F label="Face value (JPYC)" value={face} set={setFace} />
         <F label="Days to maturity" value={days} set={setDays} />
-        <p className="muted">
-          Investor bids are guided by live credit rating, settlement history, and the current liquidity curve.
-        </p>
+        {!book.me.verified && <p className="form-warning">Your company is still under review.</p>}
+        {duplicate && <p className="form-warning">This invoice reference is already registered by another supplier.</p>}
+        {!validDays && <p className="form-warning">Maturity must be at least 7 days from registration.</p>}
         <button
-          disabled={!isAddress(debtor)}
-          onClick={() =>
-            send('Register invoice', dep.registry, ABI.registry, 'registerInvoice', [
+          disabled={!ready}
+          onClick={() => send('Register invoice on-chain', dep.registry, ABI.registry, 'registerInvoice', [
               debtor,
               u(face),
               BigInt(book.chainTime + Number(days) * 86400),
-              docHash ?? keccak256(toBytes(`${debtor}-${face}-${days}-${Date.now()}`)),
-              ref,
-            ])
-          }
+              docHash!,
+              ref.trim(),
+            ])}
         >
-          Upload invoice
+          Register invoice on-chain
         </button>
+        <div className="invoice-process" aria-label="Invoice funding process">
+          <div className={docHash ? 'complete' : 'current'}><b>1</b><span>Document verified<small>PDF hashed locally</small></span></div>
+          <div className={registered ? 'complete' : docHash ? 'current' : ''}><b>2</b><span>On-chain registration<small>Wallet confirmation required</small></span></div>
+          <div className={registered?.status && registered.status >= 2 ? 'complete' : registered ? 'current' : ''}><b>3</b><span>Buyer approval<small>{registered?.status === 1 ? 'Awaiting buyer' : 'Required before funding'}</small></span></div>
+          <div className={registered?.poolCreated ? 'complete' : registered?.status === 2 ? 'current' : ''}><b>4</b><span>Investor market<small>Pool and bids open</small></span></div>
+          <div className={registered && registered.funded > 0n ? 'complete' : registered?.poolCreated ? 'current' : ''}><b>5</b><span>Funding and settlement<small>Tracked until maturity</small></span></div>
+        </div>
       </section>
       {mine.map((inv) => (
         <SellCard key={inv.id} inv={inv} dep={dep} book={book} send={send} s={s} />

@@ -425,6 +425,16 @@ td.actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .attachment-error, .attachment-ready { margin: 8px 6px 0; font-size: 11px; line-height: 1.4; }
 .attachment-error { color: var(--negative); }
 .attachment-ready { color: var(--positive); }
+.form-warning { margin: 8px 0; color: var(--caution); font-size: 12px; }
+.invoice-process { display: grid; gap: 8px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--bone); }
+.invoice-process > div { display: grid; grid-template-columns: 30px minmax(0, 1fr); align-items: center; gap: 10px; color: var(--muted); opacity: 0.58; }
+.invoice-process b { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; color: var(--muted); background: var(--bone); font-size: 11px; }
+.invoice-process span, .invoice-process small { display: block; }
+.invoice-process span { font-size: 12px; font-weight: 700; }
+.invoice-process small { margin-top: 1px; font-size: 10px; font-weight: 500; }
+.invoice-process > div.current, .invoice-process > div.complete { opacity: 1; color: var(--foreground); }
+.invoice-process > div.current b { color: white; background: #3081ef; }
+.invoice-process > div.complete b { color: var(--mint-ink); background: var(--mint); }
 .send-button { width: 38px; height: 38px; display: grid; place-items: center; padding: 0; font-size: 19px; }
 
 @media (max-width: 1180px) {
