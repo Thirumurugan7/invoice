@@ -35,7 +35,7 @@ rate(debtor) = base rate                      (operator: funding cost)
              − 0.1% × on-time settlements      (max −1%)        clamped to [base, 50%]
 ```
 
-A debtor the operator hasn't rated is priced as **G5** (17%): the risk is priced into the discount, so any supplier can invoice any company. A downgrade, or a default on **any** of the debtor's invoices, reprices **every** open invoice of that debtor at once. The hook then blocks buying above the new curve and lets holders exit only toward it. The hook uses three callbacks:
+A debtor the operator hasn't rated is priced as **G5** (17%). Any supplier can invoice any company; an unrated debtor must lock 20% collateral before it can accept. A downgrade, or a default on **any** of the debtor's invoices, reprices **every** open invoice of that debtor at once. The hook then blocks buying above the new curve and lets holders exit only toward it. The hook uses three callbacks:
 - **`beforeInitialize`:** the pool must pair an **accepted** invoice token with JPYC, and must **start on the curve** (within the band).
 - **`beforeSwap`:** the invoice must be tradable: accepted, not frozen by the operator, and **more than 1 day before maturity** (the holder set is then fixed for settlement).
 - **`afterSwap`:** the post-swap price must be within **±`bandBps`** (default 2%) of `P(now)`, **or** the swap must have moved the price **toward** the curve. Suppliers can't be dumped on at a predatory discount, nobody can pump an invoice above its curve, and a pool left behind as the curve accretes can always be pulled back. It emits `CurveTrade(id, price, fair, deviation)`.
@@ -49,15 +49,17 @@ A debtor the operator hasn't rated is priced as **G5** (17%): the risk is priced
 
 ### Curvegrid (RWA) side: `src/rwa/InvoiceRegistry.sol` + `multibaas/`
 **The lifecycle:**
-- **Open access (no KYB/KYC):** any wallet can register, accept, pay, hold, trade and redeem invoices. Companies set their own display name (`setCompanyName`); it is self-declared and not verified.
-- **Registration:** any supplier registers an invoice against any debtor. The **SHA-256 of the invoice PDF** (hashed in the browser, never uploaded) can be registered only once, so **二重譲渡 (financing the same receivable twice) is blocked**.
+- **Open access (no KYB/KYC):** any wallet can register, accept, pay, hold, trade and redeem invoices. Companies set their own display name (`setCompanyName`). Names are **unique** (exact match; `NameTaken`) but self-declared; the operator can take one down (`clearCompanyName`), and the app marks every company the operator hasn't rated as **unverified**.
+- **Registration:** any supplier registers an invoice against any debtor; it is never blocked by the debtor. Face value is capped at ¥1 trillion. The **SHA-256 of the invoice PDF** (hashed in the browser, never uploaded) can be registered once per supplier and debtor, so **二重譲渡 (financing the same receivable twice) is blocked**. The key includes the supplier, so front-running someone's document hash doesn't block their invoice, and a rejected invoice frees its document so a corrected one can be registered.
+- **Outstanding = accepted, unpaid face only.** Pending invoices don't count, so strangers' spam can't block a debtor, raise its collateral requirement or move its rate.
 - **Acceptance** mints tokens equal to the face value.
 - **Payment:** the debtor pays JPYC, early or at maturity. On-time or late settlement is recorded in the debtor's credit history.
 - **Settlement:** holders **redeem 1:1**, paid first, then burned.
 - **Default:** past the 3-day grace period, anyone can mark it defaulted, and holders **redeem pro-rata** of what was paid.
 - **Debtor collateral (`src/rwa/CollateralVault.sol`):**
-  - **Optional by default:** any debtor may lock JPYC; nobody is required to, so a debtor can never block a supplier from invoicing. The operator can make it mandatory per grade (`setRequiredBps`, Operator tab or `npm run operator -- require <grade> <bps>`); a debtor at that grade must then cover that share of everything it owes before a new invoice can be registered against it (`CollateralRequired`). The deploy sets every grade to 0% (`COLLATERAL_REQUIRED_BPS`).
-  - **Locked collateral earns interest** at an operator-set APR (default 3%, max 20%), paid in JPYC from a reward pool the operator funds (`fundRewards`). `claimInterest` pays what the pool holds; any shortfall stays claimable. Interest is booked before every collateral change and on APR changes, so it's exact per second.
+  - **Required at acceptance, not registration:** an **unrated** debtor must hold collateral covering **20%** of everything it will owe before it can accept an invoice (`CollateralRequired`). Rated grades default to 0% (optional). The operator sets both per grade, index 0 = unrated (`setRequiredBps`, Operator tab or `npm run operator -- require <grade> <bps>`; deploy: `UNRATED_COLLATERAL_BPS`, `COLLATERAL_REQUIRED_BPS`).
+  - **Locked until paid:** collateral backing the debtor's accepted, unpaid invoices can't be withdrawn (`lockedOf`); only the excess can. A debtor can't take its collateral out before a default.
+  - **Interest on backing collateral only** at an operator-set APR (default 3%, max 20%): it accrues on min(collateral, outstanding), so parking JPYC without invoices earns nothing. Paid in JPYC from a reward pool the operator funds (`fundRewards`); `claimInterest` pays what the pool holds and any shortfall stays claimable. Booked exactly per second across deposits, payments, defaults and APR changes.
   - Coverage lowers the rate by up to **−2% at 100% coverage**.
   - Collateral can't be withdrawn below what outstanding invoices require.
   - **On default, collateral is seized automatically** (up to the shortfall) and added to what holders redeem. In the tested case, recovery rises from 30% to 50%. Interest earned before the default stays with the debtor and comes from the reward pool, never from the payout.
@@ -76,7 +78,7 @@ A debtor the operator hasn't rated is priced as **G5** (17%): the risk is priced
 ## Run it
 ```bash
 git clone --recursive https://github.com/Thirumurugan7/invoice && cd invoice   # submodules: uniswap-hooks (v4-core/periphery/OZ), forge-std
-forge build && forge test                     # 64 tests: lifecycle, open access, 二重譲渡, credit repricing, collateral + interest, curve band, drift, cutoff, freeze, default, router, UR fork
+forge build && forge test                     # 94 tests: lifecycle, open access, 二重譲渡, credit repricing, collateral + interest, adversarial edge cases, curve band, drift, cutoff, freeze, default, router, UR fork
 ./scripts/local-chain.sh                      # anvil :8546 at Fri 2026-09-25 10:00 JST + deploy + demo invoice #1 (¥1M, 90d, 3%) + pool + ¥600k bids + ¥200k reward pool at 3% APR
 cd web && npm install && npm run dev          # http://localhost:5174 (accounts: operator, supplier さくら精工, debtor 東京モーターズ, investor, new unrated companies A and B)
 ./scripts/warp.sh 90                          # move time to maturity (the UI has buttons too)
@@ -87,7 +89,7 @@ npm run link          # register + link + sync + webhook
 npm run webhook       # signed webhook receiver
 npm run operator -- rate 0x... 2              # rate a debtor G2 (built by MultiBaas, signed by the operator key)
 npm run operator -- apr 300                   # collateral interest: 3% APR
-npm run operator -- require 5 0               # mandatory collateral for G5/unrated debtors: 0 = optional (default)
+npm run operator -- require 0 2000            # collateral an UNRATED debtor needs to accept: 20% (default); 1..5 = rated grades
 npm run book          # receivables book from Event Queries
 ```
 
@@ -105,27 +107,24 @@ forge script script/UniversalRouterSell.s.sol --rpc-url $SEPOLIA_RPC_URL --priva
 SEPOLIA_RPC_URL=... forge test --match-contract UniversalRouterFork -vv
 ```
 
-## Live on Sepolia (2026-09-26): real JPYC, open access, collateral interest
+## Live on Sepolia (2026-09-26): real JPYC, open access, collateral at acceptance
 | Contract | Address |
 |---|---|
-| InvoiceRegistry | `0xdDfF37Bd15C3489e5DE953CA1C10f92397DE1E71` |
-| CreditRiskModel | `0xb7f45ED8846Cc6bcecFe856c04E6442130D55F4b` |
-| CollateralVault | `0x3a3009DcAfBe2521B50df2dcF8A6Dff9fA7396B8` (3% APR, ¥200,000 reward pool, collateral optional for every grade) |
-| MaturityCurveHook | `0x171a7D09da98a1e9fBAC208257C63E03DF6860C0` |
-| TegataMarket | `0x9B8Cd3012F8c50BE91aa854A7Ebc55459c96cd44` |
+| InvoiceRegistry | `0x3Ae8E6b8b203581105c55f24482C81Bb58DDea97` |
+| CreditRiskModel | `0x9F70536df28432485b10F12d561815460ae7f88b` |
+| CollateralVault | `0x4014a110a8D42090E96Fa7Ba6407cA8084Fea88e` (unrated 20% to accept, rated 0%; 3% APR on backing collateral; ¥200,000 reward pool) |
+| MaturityCurveHook | `0x5722D7c368302f6536249A6FBfa452FDcbbc20C0` |
+| TegataMarket | `0xfF2c48f6496Bb0Af3f95460CF9cdbA4656992dC3` |
 | **JPYC (real, JPYC Inc. Sepolia)** | `0xE7C3D8C9a439feDe00D2600032D5dB0Be71C3c29` |
 | Uniswap v4 PoolManager (official) | `0xE03A1074c86CFeDd5C142C4F04F1a1536e203543` |
 | Uniswap Universal Router (official) | `0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b` |
-| Invoice #1 token (`Tegata SKR-2026-0925-001`) | `0xC05d084e58373fE22570e5f15C51ECbabb46e549` |
+| Invoice #1 token (`Tegata SKR-2026-0925-001`) | `0xd3B13b141d50C4bf2C244Ac7164175Cb8d881E41` |
 
-**Open-access end to end with a brand-new wallet** (no KYB, no rating, no approval), in real JPYC. This run used a 20% requirement for G5; the operator has since set every grade to 0% through MultiBaas (`npm run operator -- require 4 0` / `require 5 0`), so collateral is now optional (steps 2–3 would be skipped):
-1. The new wallet named itself `新規商事株式会社 (NewCo Trading)` (`setCompanyName`); unrated, it priced as G5 (17%).
-2. Sakura Seiko's ¥100,000 invoice against it reverted with `CollateralRequired(NewCo, ¥20,000, ¥0)`.
-3. NewCo locked ¥20,000; registration (`NEWCO-2026-0926-001`) then succeeded at **16.60%** (20% coverage −0.4%), and NewCo accepted.
-4. The investor opened the pool on the curve and posted ¥50,000 of bids; the supplier sold ¥20,000 of face early for **¥19,605.19 JPYC** (curve ¥19,731).
-5. NewCo paid ¥100,000 early: **Settled**, on-time credit event, rate 17% → 14.90% (16.90% once it withdrew its collateral). The supplier redeemed ¥80,000 and the investor ¥20,000, both 1:1.
-6. NewCo claimed its collateral interest from the reward pool and withdrew all its collateral. The vault then held exactly the reward pool.
-7. MultiBaas indexed it all: the webhook logged `CompanyNamed`, collateral, registration, the curve trade and settlement, and auto-linked `tegata_invoice_2`; `npm run book` shows the invoice, the on-time credit event and the trade.
+**Security fixes verified against these contracts** (local fork of Sepolia, impersonated accounts): an exact-name takeover of Tokyo Motors reverts `NameTaken`; an unrated sybil can't accept without collateral (`CollateralRequired`); a 2^256−1 face reverts `InvalidTerms`; three ¥1 trillion pending invoices leave Tokyo Motors' outstanding (¥1M) and rate (3%) unchanged and its next legit invoice still registers and is accepted; front-running a document hash doesn't block the real invoice; collateral backing an accepted invoice can't be withdrawn (`BelowRequired`); ¥1M of parked JPYC earns 0 after a year while ¥200k of backing collateral earns ¥6,000.
+
+**Real run with a brand-new unrated wallet:** Sakura Seiko registered ¥50,000 against it with no collateral (`NEWCO-2026-0926-002`); accepting needed ¥10,000 (20%), which NewCo locked; the collateral stayed locked until NewCo paid; after payment it withdrew everything, the supplier redeemed ¥50,000 1:1, token supply went to 0 and the vault held exactly the reward pool.
+
+Previous open-access deployment (before the security fixes), superseded: registry `0xdDfF37Bd…1E71`. There, a brand-new wallet ran the whole lifecycle in real JPYC: named itself, locked collateral, got invoiced at 16.60%, the supplier sold ¥20,000 of face early for ¥19,605.19, the debtor paid early (Settled, on-time credit event), holders redeemed 1:1, and MultiBaas indexed every step.
 
 Earlier deployments (KYB/KYC era), superseded:
 - **Real JPYC:** the demo wallets were funded from JPYC's official Sepolia faucet (`0x5Fe7…c5D5`). No mock token is involved.
@@ -151,20 +150,20 @@ MultiBaas findings (also useful for Curvegrid feedback):
 - Both bare event names and full signatures work in `eventName`.
 
 ## Verified
-**`forge test`: 65/65 passing** (the fork suite runs when `SEPOLIA_RPC_URL` is set), including:
+**`forge test`: 94/94 passing** (the fork suite runs when `SEPOLIA_RPC_URL` is set), including:
 - **Credit:**
   - The rate comes from the debtor; an unrated debtor is priced as G5 (17%) and follows the operator's rating once rated.
-  - With the default 0% requirement an unrated debtor is invoiced at once at 17%; voluntary collateral lowers the rate (−1% at 50% coverage) and can be withdrawn freely. With a requirement set, registration waits for the collateral.
+  - Anyone can invoice an unrated debtor; to accept it must first lock 20%. With that requirement switched off it accepts at once at 17%; voluntary collateral lowers the rate (−1% at 50% coverage) and stays locked until paid.
   - A downgrade reprices the pool: buys are blocked and sells are allowed.
   - A default on one invoice reprices the debtor's others (3% → 13%).
   - On-time settlement lowers the rate (2.90%); late payment raises it (4%); the rate is clamped.
 - **Collateral (`test/Collateral.t.sol`):**
-  - When the operator requires 20% for G5, a G5 debtor must cover it before being invoiced; G2 needs none.
-  - No withdrawals below the requirement; payments reduce what's required.
+  - Unrated debtors need 20% to accept (and 20% of the new total for each further invoice); rated grades need nothing unless the operator sets it.
+  - Collateral backing accepted invoices is locked until paid; payments unlock it; only the excess is free; pending invoices don't count.
   - Coverage lowers the rate (−1% at 50%, −2% at 100%, floored at the base rate).
   - On default, collateral is seized into the payout (recovery 30% → 50%); only the registry can seize.
 - **Collateral interest (`test/CollateralInterest.t.sol`):**
-  - 3% APR on ¥100,000 for a year pays exactly ¥3,000; deposits, withdrawals and APR changes are booked exactly.
+  - 3% APR on ¥200,000 of backing collateral for a year pays exactly ¥6,000; parked collateral earns nothing; collateral above what's owed earns nothing; deposits, payments and APR changes are booked exactly.
   - A short pool pays what it holds and keeps the rest claimable; the pool can never pay out collateral.
   - Only the operator sets the APR (capped at 20%), the collateral requirement, or withdraws unused rewards.
   - On default, holders get the seized collateral in full and the debtor's earned interest comes from the pool.
@@ -175,7 +174,8 @@ MultiBaas findings (also useful for Curvegrid feedback):
   - The ¥2,000 example: ¥1,990.19 today at 3%, ¥1,945.63 after a downgrade to 17%, and the debtor still owes and pays exactly ¥2,000, redeemed 1:1.
   - Trading closes 1 day before the due date.
 - **RWA:**
-  - Transfers go to any wallet; an anonymous wallet can buy from the pool; any company can register and accept; names are self-declared.
+  - Transfers go to any wallet; an anonymous wallet can buy from the pool; any company can register and accept; names are unique but self-declared.
+- **Adversarial (`test/EdgeCases.t.sol`):** `FIXED` = attacks that now fail (exact-name takeover, pending-invoice spam blocking or repricing a debtor, doc-hash front-running, withdrawing collateral before default, draining the reward pool with parked JPYC, re-registering a corrected invoice); `RESIDUAL` = still possible (see Limits); `HOLDS` = access control, redemption, payment caps, the curve band, bid ownership, vault solvency.
   - The token is named after the invoice number; `contractURI` serves live JSON (status and amount paid update on payment); the `InvoiceMetadata` event is indexed; the JSON is escaped.
 - **Router:**
   - Deadlines, exact-output sells and buys, max-in slippage.
@@ -198,7 +198,8 @@ MultiBaas findings (also useful for Curvegrid feedback):
 **Webhook receiver:** a correctly signed payload was accepted, a forged signature got **401**, and the event handler ran.
 
 ## Limits
-- **No KYB/KYC:** anyone can register invoices under any self-declared name. The protections that remain are the debtor's on-chain acceptance, the one-time document hash (二重譲渡), G5 pricing for unrated debtors (plus an optional operator-set collateral requirement), and the operator's freeze. Real KYB (NTA 法人番号 check, World ID, an HSM-signed attestation via MultiBaas) is future work.
+- **No KYB/KYC, so self-dealing fraud is limited, not prevented.** One person with two wallets can invoice itself, lock the required 20%, accept, sell the tokens and never pay. Holders then recover the seized 20%; in the test the fraudster still nets about ¥376k on a ¥1M invoice while the buyer recovers 20%. Look-alike names (e.g. a trailing space) also pass the uniqueness check; the app's "unverified" label is the only warning. Real KYB (NTA 法人番号 check, World ID, an HSM-signed attestation via MultiBaas) is future work.
+- **Medium, not yet fixed** (`test_RESIDUAL_*`): on-time credit can be farmed with dust self-invoices; a defaulter resets its history with a new wallet; the curve is only enforced in the Tegata pool (tokens can trade anywhere else at any price); a newline in a name breaks the metadata JSON; a debtor can't pay after an invoice is marked defaulted.
 - **Credit inputs:** grades are set by the operator (e.g. from a 帝国データバンク / 東京商工リサーチ score). The on-chain part is the pricing rule and the payment history, not the credit research itself.
 - **Pool repricing:** when a debtor is downgraded, existing bid ladders are adversely selected until LPs re-post. The hook limits this to exits toward the new curve.
 
