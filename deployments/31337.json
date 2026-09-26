@@ -1,11 +1,13 @@
 {
   "chainId": 31337,
   "demoInvoice": 1,
-  "hook": "0xaE94053b7f760fAF67B94E0E58ee1AE61375E0c0",
+  "hook": "0xb42d4c2483817E7A6eB81656F7dc13164233E0C0",
   "jpyc": "0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512",
-  "market": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
+  "market": "0x68B1D87F95878fE05B998F19b66F4baba5De1aed",
   "operator": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
   "poolManager": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
-  "registry": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
-  "startBlock": 0
+  "registry": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
+  "risk": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+  "startBlock": 0,
+  "vault": "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9"
 }

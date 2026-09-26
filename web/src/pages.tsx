@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { isAddress, keccak256, parseUnits, toBytes, type Address } from 'viem';
+import { isAddress, parseUnits, type Address } from 'viem';
 import { ABI, sha256File, type Deployment, type Session } from './chain';
 import { jst, price, short, yen } from './errors';
 import { fetchBookFromMultiBaas, multibaasEnabled, type MbBook } from './multibaas';
@@ -29,6 +29,19 @@ function Badge({ inv }: { inv: InvoiceRow }) {
   return <span className={`badge ${cls}`}>{STATUS[inv.status]}</span>;
 }
 
+function CompanyName({ dep, book, send }: Props) {
+  const [name, setName] = useState('');
+  return (
+    <div className="company-name-control">
+      <p className="muted">{book.me.name ? `Company: ${book.me.name}` : 'Add a unique display name for on-chain invoice records.'}</p>
+      <div className="row">
+        <F label="Company name" value={name} set={setName} ph={book.me.name || '株式会社…'} />
+        <button className="ghost" disabled={!name.trim()} onClick={() => send('Set company name', dep.registry, ABI.registry, 'setCompanyName', [name.trim()])}>Save name</button>
+      </div>
+    </div>
+  );
+}
+
 export function SupplierPage({ dep, s, book, send }: Props) {
   const [debtor, setDebtor] = useState('');
   const [face, setFace] = useState('500000');
@@ -36,48 +49,81 @@ export function SupplierPage({ dep, s, book, send }: Props) {
   const [docHash, setDocHash] = useState<`0x${string}`>();
   const [fileName, setFileName] = useState('');
   const [ref, setRef] = useState('');
+  const [documentError, setDocumentError] = useState<string>();
   const mine = book.invoices.filter((i) => i.supplier.toLowerCase() === s.account.toLowerCase() || i.myTokens > 0n);
+  const registered = mine.find((invoice) => invoice.ref === ref);
+  const validFace = Number(face) > 0 && Number(face) <= 1_000_000_000_000;
+  const validDays = Number.isInteger(Number(days)) && Number(days) >= 1;
+  const ready = Boolean(docHash && ref.trim() && isAddress(debtor) && debtor.toLowerCase() !== s.account.toLowerCase() && validFace && validDays && !registered);
+  const prefillFromDocument = (text: string) => {
+    const reference = text.match(/(?:invoice|reference|invoice\s*(?:number|no\.?|#))\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{3,})/i)?.[1];
+    const wallet = text.match(/0x[a-fA-F0-9]{40}/)?.[0];
+    const amount = text.match(/(?:face\s*value|total|amount\s*due|invoice\s*amount)\s*[:¥$]?\s*(?:JPY|JPYC)?\s*([0-9][0-9,]*)/i)?.[1];
+    const due = text.match(/(?:due\s*date|payment\s*due|maturity)\s*[:\s]+(\d{4}[-/]\d{1,2}[-/]\d{1,2})/i)?.[1];
+    if (reference && !ref) setRef(reference);
+    if (wallet && !debtor) setDebtor(wallet);
+    if (amount) setFace(amount.replace(/,/g, ''));
+    if (due) {
+      const dueTime = new Date(`${due.replaceAll('/', '-')}T00:00:00+09:00`).getTime() / 1000;
+      if (Number.isFinite(dueTime)) setDays(String(Math.max(7, Math.ceil((dueTime - book.chainTime) / 86400))));
+    }
+  };
   return (
     <div className="grid">
-      <section className="card">
+      <section className="card invoice-intake">
         <h3>Upload invoice for liquidity</h3>
-        <p className="muted">{book.me.verified ? `Permission policy active for ${book.me.name}` : 'Under review — an operator must approve this company before funding.'}</p>
+        <CompanyName dep={dep} s={s} book={book} send={send} />
         <label className="field">
           <span>Invoice PDF</span>
           <input
             type="file"
+            accept=".pdf,.txt,application/pdf,text/plain"
             onChange={async (e) => {
               const f = e.target.files?.[0];
               if (f) {
+                setDocumentError(undefined);
                 setFileName(f.name);
                 if (!ref) setRef(f.name.replace(/\.[^.]+$/, '').replace(/^invoice-/i, ''));
-                setDocHash(await sha256File(f));
+                try {
+                  const [hash, text] = await Promise.all([sha256File(f), readAssistantAttachment(f)]);
+                  setDocHash(hash);
+                  prefillFromDocument(text);
+                } catch (error: any) {
+                  setDocHash(undefined);
+                  setDocumentError(String(error?.message ?? 'Could not read this invoice.'));
+                }
               }
             }}
           />
         </label>
         {docHash && <p className="muted mono">{fileName}: {short(docHash)}</p>}
+        {documentError && <p className="attachment-error" role="alert">{documentError}</p>}
         <F label="Invoice number (請求書番号)" value={ref} set={setRef} ph="SKR-2026-0926-001" />
         <F label="Buyer company wallet" value={debtor} set={setDebtor} ph="0x… approved company" />
         <F label="Face value (JPYC)" value={face} set={setFace} />
         <F label="Days to maturity" value={days} set={setDays} />
-        <p className="muted">
-          Investor bids are guided by live credit rating, settlement history, and the current liquidity curve.
-        </p>
+        {isAddress(debtor) && debtor.toLowerCase() === s.account.toLowerCase() && <p className="form-warning">Supplier and buyer must use different wallets.</p>}
+        {!validFace && <p className="form-warning">Face value must be above zero and no more than ¥1 trillion.</p>}
+        {!validDays && <p className="form-warning">Maturity must be at least 1 day from registration.</p>}
         <button
-          disabled={!isAddress(debtor)}
-          onClick={() =>
-            send('Register invoice', dep.registry, ABI.registry, 'registerInvoice', [
+          disabled={!ready}
+          onClick={() => send('Register invoice on-chain', dep.registry, ABI.registry, 'registerInvoice', [
               debtor,
               u(face),
               BigInt(book.chainTime + Number(days) * 86400),
-              docHash ?? keccak256(toBytes(`${debtor}-${face}-${days}-${Date.now()}`)),
-              ref,
-            ])
-          }
+              docHash!,
+              ref.trim(),
+            ])}
         >
-          Upload invoice
+          Register invoice on-chain
         </button>
+        <div className="invoice-process" aria-label="Invoice funding process">
+          <div className={docHash ? 'complete' : 'current'}><b>1</b><span>Document verified<small>PDF hashed locally</small></span></div>
+          <div className={registered ? 'complete' : docHash ? 'current' : ''}><b>2</b><span>On-chain registration<small>Wallet confirmation required</small></span></div>
+          <div className={registered?.status && registered.status >= 2 ? 'complete' : registered ? 'current' : ''}><b>3</b><span>Buyer approval<small>{registered?.status === 1 ? 'Awaiting buyer' : 'Required before funding'}</small></span></div>
+          <div className={registered?.poolCreated ? 'complete' : registered?.status === 2 ? 'current' : ''}><b>4</b><span>Investor market<small>Pool and bids open</small></span></div>
+          <div className={registered && registered.funded > 0n ? 'complete' : registered?.poolCreated ? 'current' : ''}><b>5</b><span>Funding and settlement<small>Tracked until maturity</small></span></div>
+        </div>
       </section>
       {mine.map((inv) => (
         <SellCard key={inv.id} inv={inv} dep={dep} book={book} send={send} s={s} />
@@ -99,7 +145,7 @@ function SellCard({ inv, dep, book, send, s }: { inv: InvoiceRow; dep: Deploymen
       </p>
       <InvoiceRecord inv={inv} s={s} />
       <p>Available to sell {yen(inv.myTokens)} face value</p>
-      <p className="muted">Buyer grade G{inv.debtorGrade} · pricing rate {pct(inv.rateBps)} (at upload {pct(inv.rateAtIssueBps)})</p>
+      <p className="muted">Buyer grade G{inv.debtorGrade}{inv.debtorRated ? '' : ' (unrated)'} · pricing rate {pct(inv.rateBps)} (at upload {pct(inv.rateAtIssueBps)})</p>
       {inv.status === 2 && inv.poolCreated && (
         <>
           <F label="Sell face amount" value={amt} set={setAmt} />
@@ -145,11 +191,11 @@ export function DebtorPage({ dep, s, book, send }: Props) {
   const mine = book.invoices.filter((i) => i.debtor.toLowerCase() === s.account.toLowerCase());
   const [amt, setAmt] = useState('20000');
   const m = book.me;
-  const weak = m.grade >= 4;
   return (
     <div className="grid">
       <section className="card">
         <h3>Invoice approvals</h3>
+        <CompanyName dep={dep} s={s} book={book} send={send} />
         <p>{book.me.name || short(s.account)} · payment balance {yen(book.me.jpyc)}</p>
         <button className="ghost" onClick={() => send('Approve JPYC for payments', dep.jpyc, ABI.jpyc, 'approve', [dep.registry, MAX])}>
           Approve settlement account
@@ -158,11 +204,7 @@ export function DebtorPage({ dep, s, book, send }: Props) {
       <section className="card">
         <h3>Settlement reserve</h3>
         <p className="muted">
-          {m.grade === 0
-            ? 'Not rated yet.'
-            : weak
-              ? `Grade G${m.grade}: additional reserve required before new invoices can enter the marketplace.`
-              : `Grade G${m.grade}: optional reserve can improve investor pricing by reducing settlement risk.`}
+          {m.rated ? `Grade G${m.grade}` : 'Unrated'} · acceptance requires {(m.requiredBps / 100).toFixed(0)}% collateral. Locked collateral earns {pct(book.aprBps)} APR while backing accepted invoices.
         </p>
         <p>
           Outstanding {yen(m.outstanding)} · reserved <b>{yen(m.collateral)}</b> · required {yen(m.collateralRequired)} · coverage {(m.coverageBps / 100).toFixed(0)}%
@@ -176,6 +218,8 @@ export function DebtorPage({ dep, s, book, send }: Props) {
           <button className="ghost" onClick={() => send(`Withdraw ${amt} JPYC collateral`, dep.vault, ABI.vault, 'withdraw', [u(amt)])}>Release reserve</button>
         </div>
         <p className="muted small-text">If settlement fails, reserved funds are routed to invoice holders automatically.</p>
+        <p className="muted small-text">Locked {yen(m.locked)} · earning interest {yen(m.stake)} · accrued {yen(m.interest)}</p>
+        <button disabled={m.interest === 0n || book.rewardReserve === 0n} onClick={() => send('Claim collateral interest', dep.vault, ABI.vault, 'claimInterest', [])}>Claim interest</button>
       </section>
       {mine.length === 0 && <p className="muted">No invoices addressed to you.</p>}
       {mine.map((inv) => (
@@ -189,10 +233,11 @@ export function DebtorPage({ dep, s, book, send }: Props) {
           </p>
           {inv.status === 1 && (
             <div className="row">
-              <button onClick={() => send('Accept (発生記録)', dep.registry, ABI.registry, 'acceptInvoice', [BigInt(inv.id)])}>Approve invoice</button>
+              <button disabled={m.collateral < inv.acceptNeed} onClick={() => send('Accept (発生記録)', dep.registry, ABI.registry, 'acceptInvoice', [BigInt(inv.id)])}>Approve invoice</button>
               <button className="danger" onClick={() => send('Reject', dep.registry, ABI.registry, 'rejectInvoice', [BigInt(inv.id), 'disputed'])}>
                 Reject
               </button>
+              {m.collateral < inv.acceptNeed && <span className="form-warning">Reserve {yen(inv.acceptNeed - m.collateral)} more before approval.</span>}
             </div>
           )}
           {inv.status === 2 && (
@@ -212,11 +257,6 @@ export function InvestorPage({ dep, s, book, send }: Props) {
   const [offset, setOffset] = useState('0');
   return (
     <div>
-      {s.kind !== 'readonly' && !book.me.canHold && (
-        <div className="banner error">
-          This wallet is still under review. Investor approval is required before it can place bids or hold invoice positions.
-        </div>
-      )}
       <p className="muted">
         Available funds {yen(book.me.jpyc)} · bid band ±{String(book.bandBps)} bps ·{' '}
         <button className="ghost small" onClick={() => send('Approve JPYC for market', dep.jpyc, ABI.jpyc, 'approve', [dep.market, MAX])}>
@@ -311,37 +351,16 @@ export function InvestorPage({ dep, s, book, send }: Props) {
 
 // ---------------------------------------------------------------- Operator
 export function OperatorPage({ dep, book, send }: Props) {
-  const [who, setWho] = useState('');
-  const [corp, setCorp] = useState('');
-  const [name, setName] = useState('');
   const [id, setId] = useState('1');
   const [debtor, setDebtor] = useState('');
   const [grade, setGrade] = useState('2');
   const [base, setBase] = useState('');
-  const [inv, setInv] = useState('');
+  const [apr, setApr] = useState('');
+  const [fund, setFund] = useState('100000');
+  const [reqGrade, setReqGrade] = useState('0');
+  const [reqBps, setReqBps] = useState('');
   return (
     <div className="grid">
-      <section className="card">
-        <h3>Company permission policy</h3>
-        <p className="muted">
-          {book.me.isOperator ? 'Operator access active.' : 'You are not an operator.'} Production approvals can be delegated through a secure cloud signing policy.
-        </p>
-        <F label="Company wallet" value={who} set={setWho} ph="0x…" />
-        <F label="法人番号 (corporate number)" value={corp} set={setCorp} ph="1010001000001" />
-        <F label="Company name" value={name} set={setName} />
-        <button disabled={!isAddress(who) || !corp} onClick={() => send('Verify company', dep.registry, ABI.registry, 'verifyCompany', [who, keccak256(toBytes(`corp:${corp}`)), name])}>
-          Approve company
-        </button>
-      </section>
-      <section className="card">
-        <h3>Investor permissions</h3>
-        <p className="muted">Only approved investors, companies, and venues can hold invoice positions.</p>
-        <F label="Investor wallet" value={inv} set={setInv} ph="0x…" />
-        <div className="row">
-          <button disabled={!isAddress(inv)} onClick={() => send('Approve investor', dep.registry, ABI.registry, 'approveInvestor', [inv, true])}>Approve</button>
-          <button className="ghost" disabled={!isAddress(inv)} onClick={() => send('Revoke investor', dep.registry, ABI.registry, 'approveInvestor', [inv, false])}>Revoke</button>
-        </div>
-      </section>
       <section className="card">
         <h3>Buyer credit rating</h3>
         <p className="muted">
@@ -359,6 +378,17 @@ export function OperatorPage({ dep, book, send }: Props) {
         <button className="ghost" disabled={!base} onClick={() => send('Set base rate', dep.risk, ABI.risk, 'setBaseRate', [Number(base)])}>Set base rate</button>
       </section>
       <section className="card">
+        <h3>Collateral policy and rewards</h3>
+        <p className="muted">Unrated wallets use grade 0. Requirements are enforced when the buyer accepts, never when the supplier registers.</p>
+        <label className="field"><span>Risk band</span><select value={reqGrade} onChange={(event) => setReqGrade(event.target.value)}><option value="0">Unrated</option>{[1,2,3,4,5].map((g) => <option key={g} value={g}>G{g}</option>)}</select></label>
+        <F label="Required collateral (bps)" value={reqBps} set={setReqBps} ph={String(book.requiredByGrade[Number(reqGrade)])} />
+        <button className="ghost" disabled={reqBps === ''} onClick={() => send('Set collateral requirement', dep.vault, ABI.vault, 'setRequiredBps', [Number(reqGrade), Number(reqBps)])}>Set requirement</button>
+        <F label="Collateral APR (bps)" value={apr} set={setApr} ph={String(book.aprBps)} />
+        <button className="ghost" disabled={!apr} onClick={() => send('Set collateral APR', dep.vault, ABI.vault, 'setAprBps', [Number(apr)])}>Set APR</button>
+        <F label="Reward reserve amount" value={fund} set={setFund} />
+        <div className="row"><button onClick={() => send('Fund collateral rewards', dep.vault, ABI.vault, 'fundRewards', [u(fund)])}>Fund rewards</button><button className="ghost" onClick={() => send('Withdraw unused rewards', dep.vault, ABI.vault, 'withdrawRewards', [u(fund)])}>Withdraw rewards</button></div>
+      </section>
+      <section className="card">
         <h3>Invoice review controls</h3>
         <F label="Invoice id" value={id} set={setId} />
         <div className="row">
@@ -372,16 +402,16 @@ export function OperatorPage({ dep, book, send }: Props) {
 
 export function PermissionsPage({ s, book }: Props) {
   const policy = [
-    { label: 'Company KYB', value: book.me.verified ? 'Approved' : 'Under review', tone: book.me.verified ? 'mint' : 'butter' },
-    { label: 'Investor access', value: book.me.approvedInvestor ? 'Approved' : 'Under review', tone: book.me.approvedInvestor ? 'mint' : 'butter' },
+    { label: 'Market access', value: 'Open', tone: 'mint' },
+    { label: 'Credit rating', value: book.me.rated ? `G${book.me.grade}` : 'Unrated', tone: book.me.rated ? 'mint' : 'butter' },
     { label: 'Delegated signing', value: book.me.isOperator ? 'Operator enabled' : 'Policy controlled', tone: book.me.isOperator ? 'ink' : 'lilac' },
-    { label: 'Invoice custody', value: book.me.canHold ? 'Allowed' : 'Restricted', tone: book.me.canHold ? 'mint' : 'butter' },
+    { label: 'Collateral requirement', value: pct(book.me.requiredBps), tone: book.me.requiredBps > 0 ? 'butter' : 'mint' },
   ];
   return (
     <div className="grid">
       <section className="hero permissions-hero">
         <span className="tag">Wallet & permissions</span>
-        <span className="figure">{book.me.canHold ? 'Ready' : 'Review'}</span>
+        <span className="figure">Ready</span>
         <span className="muted small-text">Permission policy for {book.me.name || short(s.account)}</span>
         <div className="hero-foot">
           <span className="mono small-text">{short(s.account)}</span>
@@ -670,18 +700,117 @@ type WorkflowReview = { nextAction: string; urgency: string; risk: string; reaso
 type AssistantMessage = { role: 'user' | 'assistant'; text: string; review?: WorkflowReview };
 type AgentName = 'GPT' | 'Claude' | 'Gemini';
 type AgentStatus = Record<AgentName, boolean>;
+const MAX_ATTACHMENT_CHARS = 30_000;
+const PLAYBOOK_STORAGE_KEY = 'workspace.playbook.v1';
 
-function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onClear: () => void }) {
-  const [provider, setProvider] = useState<AgentName>('GPT');
+function loadPlaybook(): { provider: AgentName; messages: AssistantMessage[] } {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PLAYBOOK_STORAGE_KEY) || '{}');
+    const provider = ['GPT', 'Claude', 'Gemini'].includes(saved.provider) ? saved.provider : 'GPT';
+    const messages = Array.isArray(saved.messages) ? saved.messages.slice(-100) : [];
+    return { provider, messages };
+  } catch {
+    return { provider: 'GPT', messages: [] };
+  }
+}
+
+async function readAssistantAttachment(file: File) {
+  if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+    const pdfjs = await import('pdfjs-dist');
+    pdfjs.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString();
+    const document = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+    const pages: string[] = [];
+    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+      const page = await document.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const text = content.items
+        .map((item) => ('str' in item ? item.str : ''))
+        .filter(Boolean)
+        .join(' ');
+      pages.push(`[Page ${pageNumber}]\n${text}`);
+      if (pages.join('\n\n').length >= MAX_ATTACHMENT_CHARS) break;
+    }
+    const extracted = pages.join('\n\n').slice(0, MAX_ATTACHMENT_CHARS).trim();
+    if (!extracted) throw new Error('This PDF does not contain readable text. Scanned PDFs need OCR before attachment.');
+    return extracted;
+  }
+  return (await file.text()).slice(0, MAX_ATTACHMENT_CHARS);
+}
+
+const reviewSchema = [
+  'Return only valid JSON with this exact shape:',
+  '{"nextAction":"one specific action starting with a verb","urgency":"Now|Today|This week","risk":"the single most important risk or blocker","reason":"one short evidence-based reason","owner":"the team or role that should act"}',
+  'Do not claim that an action has been executed. Keep every value concise and use only the supplied data.',
+].join('\n');
+
+function portfolioSnapshot(book: Book) {
+  return {
+    chainTime: jst(book.chainTime),
+    pricingBand: pct(Number(book.bandBps)),
+    baseRate: pct(book.baseRateBps),
+    account: {
+      name: book.me.name,
+      rated: book.me.rated,
+      grade: book.me.grade,
+      collateral: yen(book.me.collateral),
+      collateralRequired: yen(book.me.collateralRequired),
+      collateralLocked: yen(book.me.locked),
+      collateralEarning: yen(book.me.stake),
+      collateralInterest: yen(book.me.interest),
+      collateralApr: pct(book.aprBps),
+      rewardReserve: yen(book.rewardReserve),
+      coverage: pct(book.me.coverageBps),
+    },
+    invoices: book.invoices.map((invoice) => ({
+      id: invoice.id,
+      reference: invoice.ref,
+      supplier: invoice.supplierName || short(invoice.supplier),
+      buyer: invoice.debtorName || short(invoice.debtor),
+      buyerGrade: invoice.debtorGrade,
+      faceValue: yen(invoice.face),
+      funded: yen(invoice.funded),
+      maturity: jst(invoice.maturity),
+      daysToMaturity: Math.ceil((invoice.maturity - book.chainTime) / 86400),
+      status: STATUS[invoice.status] || 'Unknown',
+      frozen: invoice.frozen,
+      tradable: invoice.tradable,
+      poolCreated: invoice.poolCreated,
+      fairPrice: price(invoice.fair),
+    })),
+  };
+}
+
+function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: WorkflowContext; onClear: () => void }) {
+  const initialPlaybook = useRef(loadPlaybook());
+  const [provider, setProvider] = useState<AgentName>(initialPlaybook.current.provider);
   const [draft, setDraft] = useState('');
-  const [messages, setMessages] = useState<AssistantMessage[]>([]);
+  const [messages, setMessages] = useState<AssistantMessage[]>(initialPlaybook.current.messages);
   const [status, setStatus] = useState<AgentStatus>({ GPT: false, Claude: false, Gemini: false });
   const [statusReady, setStatusReady] = useState(false);
   const [loading, setLoading] = useState(false);
   const [draggingOver, setDraggingOver] = useState(false);
   const [attachment, setAttachment] = useState<{ name: string; text: string }>();
+  const [attachmentError, setAttachmentError] = useState<string>();
   const panelRef = useRef<HTMLElement>(null);
-  const shortcuts = ['Review invoice risk', 'Prepare settlement report', 'Summarize investor bids'];
+  const snapshot = portfolioSnapshot(book);
+  const shortcuts = [
+    {
+      label: 'Portfolio review',
+      prompt: `Review this invoice portfolio. Prioritize the one issue that requires attention first.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema}`,
+    },
+    {
+      label: 'Funding recommendation',
+      prompt: `Review the open invoices and identify the single best action to improve funding. Consider maturity, funded amount, buyer grade, pricing band, tradability, and pool availability.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema}`,
+    },
+    {
+      label: 'Settlement monitor',
+      prompt: `Review settlement readiness across the invoices. Prioritize overdue or near-maturity exposure and recommend one action.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema}`,
+    },
+    {
+      label: 'Permission check',
+      prompt: `Review the account eligibility, collateral coverage, frozen invoices, and tradability flags. Recommend one compliance or permission action.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema}`,
+    },
+  ];
 
   useEffect(() => {
     fetch('/api/agents/status', { cache: 'no-store' })
@@ -691,7 +820,15 @@ function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onC
       .finally(() => setStatusReady(true));
   }, []);
 
-  const submit = async (text: string, workflow?: WorkflowContext) => {
+  useEffect(() => {
+    try {
+      localStorage.setItem(PLAYBOOK_STORAGE_KEY, JSON.stringify({ provider, messages: messages.slice(-100) }));
+    } catch {
+      // The conversation remains available for this session when storage is unavailable.
+    }
+  }, [provider, messages]);
+
+  const submit = async (text: string, workflow?: WorkflowContext, structuredLabel?: string) => {
     const clean = text.trim();
     if (!clean || loading) return;
     if (!status[provider]) {
@@ -700,7 +837,7 @@ function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onC
     }
     setMessages((current) => [...current, {
       role: 'user',
-      text: workflow ? `Review invoice #${workflow.invoiceId} and recommend the next best action.` : clean,
+      text: workflow ? `Review invoice #${workflow.invoiceId} and recommend the next best action.` : structuredLabel || clean,
     }]);
     setDraft('');
     setLoading(true);
@@ -718,7 +855,7 @@ function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onC
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'The assistant could not respond.');
       let review: WorkflowReview | undefined;
-      if (workflow) {
+      if (workflow || structuredLabel) {
         try {
           const json = String(result.reply).match(/\{[\s\S]*\}/)?.[0];
           const parsed = json ? JSON.parse(json) : undefined;
@@ -774,12 +911,15 @@ function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onC
           <span className="eyebrow">Workflow assistant</span>
           <h3>AI operations desk</h3>
         </div>
-        <div className="provider-switch" aria-label="AI provider">
-          {(['GPT', 'Claude', 'Gemini'] as AgentName[]).map((name) => (
-            <button key={name} className={provider === name ? 'active' : ''} onClick={() => setProvider(name)}>
-              <i className={status[name] ? 'connected' : ''} />{name}
-            </button>
-          ))}
+        <div className="assistant-head-actions">
+          {messages.length > 0 && <button className="ghost small" onClick={() => setMessages([])}>Clear history</button>}
+          <div className="provider-switch" aria-label="AI provider">
+            {(['GPT', 'Claude', 'Gemini'] as AgentName[]).map((name) => (
+              <button key={name} className={provider === name ? 'active' : ''} onClick={() => setProvider(name)}>
+                <i className={status[name] ? 'connected' : ''} />{name}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -807,7 +947,11 @@ function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onC
               <span />{!statusReady ? 'Checking connection…' : status[provider] ? `${provider} subscription connected` : provider === 'Gemini' ? 'Gemini CLI installation required' : `${provider} sign-in required`}
             </div>
             <div className="assistant-shortcuts">
-              {shortcuts.map((label) => <button key={label} onClick={() => submit(label)}>{label}</button>)}
+              {shortcuts.map((shortcut) => (
+                <button key={shortcut.label} onClick={() => submit(shortcut.prompt, undefined, shortcut.label)} disabled={loading || !statusReady || !status[provider]}>
+                  {shortcut.label}
+                </button>
+              ))}
             </div>
           </div>
         ) : (
@@ -838,10 +982,19 @@ function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onC
               {attachment ? attachment.name : 'Attach file'}
               <input
                 type="file"
-                accept=".txt,.md,.json,.csv,text/plain,text/markdown,application/json,text/csv"
+                accept=".pdf,.txt,.md,.json,.csv,application/pdf,text/plain,text/markdown,application/json,text/csv"
                 onChange={async (event) => {
                   const file = event.target.files?.[0];
-                  if (file) setAttachment({ name: file.name, text: (await file.text()).slice(0, 30_000) });
+                  if (!file) return;
+                  setAttachmentError(undefined);
+                  try {
+                    setAttachment({ name: file.name, text: await readAssistantAttachment(file) });
+                  } catch (error: any) {
+                    setAttachment(undefined);
+                    setAttachmentError(String(error?.message ?? 'Could not read this file.'));
+                  } finally {
+                    event.target.value = '';
+                  }
                 }}
               />
             </label>
@@ -849,8 +1002,25 @@ function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onC
           </div>
           <button type="submit" className="send-button" disabled={!draft.trim() || loading || !statusReady || !status[provider]} aria-label="Send message">↑</button>
         </div>
+        {attachmentError && <p className="attachment-error" role="alert">{attachmentError}</p>}
+        {attachment && <p className="attachment-ready">PDF or document ready · {attachment.text.length.toLocaleString()} characters extracted</p>}
       </form>
     </section>
+  );
+}
+
+export function PlaybookPage({ book }: Props) {
+  return (
+    <div className="playbook-page">
+      <div className="playbook-title">
+        <div>
+          <span className="eyebrow">Persistent workspace</span>
+          <h2>Playbook</h2>
+        </div>
+        <p className="muted">Your assistant conversations and next actions stay here when you change views or reload.</p>
+      </div>
+      <AssistantPanel book={book} onClear={() => {}} />
+    </div>
   );
 }
 
@@ -887,7 +1057,7 @@ export function BookPage({ book, onViewAll }: Props) {
             {onViewAll && <button onClick={onViewAll}>View invoices</button>}
           </div>
         </div>
-        <AssistantPanel selected={selectedWorkflow} onClear={() => setSelectedWorkflow(undefined)} />
+        <AssistantPanel book={book} selected={selectedWorkflow} onClear={() => setSelectedWorkflow(undefined)} />
       </div>
       {mb && (
         <div className="grid">

@@ -11,7 +11,7 @@ interface ICollateralCoverage {
 /// @notice The supplier does not choose the rate. Every invoice's fair-value curve uses the DEBTOR's live rate:
 ///
 ///   rate(debtor) = baseRate                                    (operator: funding cost, e.g. TONA + margin)
-///                + gradeSpread[grade(debtor)]                  (operator: KYB / credit bureau grade, 1 = best)
+///                + gradeSpread[grade(debtor)]                  (operator: credit grade, 1 = best; unrated = G5)
 ///                + defaults  × DEFAULT_PENALTY                 (registry: each invoice the debtor defaulted on)
 ///                + latePays  × LATE_PENALTY                    (registry: settled after maturity, before default)
 ///                − min(onTime, ON_TIME_CAP) × ON_TIME_CREDIT   (registry: settled on or before maturity)
@@ -19,10 +19,11 @@ interface ICollateralCoverage {
 ///
 ///   clamped to [baseRate, MAX_RATE]. A downgrade or a default therefore reprices every open invoice of that debtor
 ///   at once: the hook's band follows the new curve, so buying above it is blocked and holders can only exit toward it.
-///   Grade 0 = unrated: the registry refuses invoices against an unrated debtor.
+///   Unrated debtors (gradeOf = 0) are priced as the weakest grade, UNRATED_GRADE (G5), until the operator rates them.
 contract CreditRiskModel is AccessControl {
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
     uint8 public constant MAX_GRADE = 5;
+    uint8 public constant UNRATED_GRADE = MAX_GRADE; // unrated debtors are treated as the weakest grade
     uint32 public constant MAX_RATE = 5_000; // 50% p.a.
     uint32 public constant DEFAULT_PENALTY = 1_000;
     uint32 public constant LATE_PENALTY = 100;
@@ -40,7 +41,7 @@ contract CreditRiskModel is AccessControl {
     ICollateralCoverage public vault;
     uint32 public baseRateBps;
     uint32[MAX_GRADE + 1] public gradeSpreadBps; // index 0 unused (unrated)
-    mapping(address => uint8) public gradeOf;
+    mapping(address => uint8) public gradeOf; // operator-assigned; 0 = unrated (see gradeFor)
     mapping(address => History) public historyOf;
 
     enum CreditEvent {
@@ -115,10 +116,16 @@ contract CreditRiskModel is AccessControl {
         return gradeOf[debtor] != 0;
     }
 
+    /// @notice The grade that prices `debtor`: the operator's rating, or UNRATED_GRADE if not rated yet.
+    function gradeFor(address debtor) public view returns (uint8) {
+        uint8 g = gradeOf[debtor];
+        return g == 0 ? UNRATED_GRADE : g;
+    }
+
     /// @notice Annual simple discount rate (bps) for invoices owed by `debtor`, right now.
     function rateBps(address debtor) public view returns (uint32) {
         History memory h = historyOf[debtor];
-        uint256 up = uint256(baseRateBps) + gradeSpreadBps[gradeOf[debtor]] + uint256(h.defaults) * DEFAULT_PENALTY
+        uint256 up = uint256(baseRateBps) + gradeSpreadBps[gradeFor(debtor)] + uint256(h.defaults) * DEFAULT_PENALTY
             + uint256(h.late) * LATE_PENALTY;
         uint256 credit = uint256(h.onTime < ON_TIME_CAP ? h.onTime : ON_TIME_CAP) * ON_TIME_CREDIT;
         if (address(vault) != address(0)) credit += vault.coverageBps(debtor) * COLLATERAL_CREDIT / 10_000;

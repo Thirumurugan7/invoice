@@ -22,18 +22,22 @@ contract TegataTest is TegataBase {
         assertEq(registry.idOfToken(address(token)), invoiceId);
     }
 
-    function test_unverifiedSupplierCannotRegister() public {
-        address rogue = makeAddr("rogue");
-        vm.prank(rogue);
-        vm.expectRevert(abi.encodeWithSelector(InvoiceRegistry.NotVerified.selector, rogue));
-        registry.registerInvoice(debtor, FACE, maturity, keccak256("x"), "");
+    function test_anyCompanyCanRegisterAndAccept() public {
+        address newSupplier = makeAddr("new supplier (no KYB)");
+        vm.prank(newSupplier);
+        uint256 id2 = registry.registerInvoice(debtor, 5_000e18, maturity, keccak256("x"), "NEW-1");
+        vm.prank(debtor);
+        registry.acceptInvoice(id2);
+        assertEq(registry.invoice(id2).token.balanceOf(newSupplier), 5_000e18);
     }
 
-    function test_unverifiedDebtorRejected() public {
-        address shell = makeAddr("shell company");
-        vm.prank(supplier);
-        vm.expectRevert(abi.encodeWithSelector(InvoiceRegistry.NotVerified.selector, shell));
-        registry.registerInvoice(shell, FACE, maturity, keccak256("y"), "");
+    function test_invalidDebtorRejected() public {
+        vm.startPrank(supplier);
+        vm.expectRevert(InvoiceRegistry.InvalidTerms.selector);
+        registry.registerInvoice(address(0), FACE, maturity, keccak256("y0"), "");
+        vm.expectRevert(InvoiceRegistry.InvalidTerms.selector);
+        registry.registerInvoice(supplier, FACE, maturity, keccak256("y1"), "");
+        vm.stopPrank();
     }
 
     function test_sameInvoiceCannotBeFinancedTwice() public {
@@ -136,10 +140,8 @@ contract TegataTest is TegataBase {
 
     function test_poolMustStartOnCurve() public {
         address weak = makeAddr("weak debtor");
-        vm.startPrank(operator);
-        registry.verifyCompany(weak, keccak256("corp:3"), "Weak KK");
+        vm.prank(operator);
         risk.rate(weak, 5); // 1% + 16% = 17%
-        vm.stopPrank();
         jpyc.mint(weak, 1_000e18);
         vm.startPrank(weak); // G5 must lock 20% of what it will owe before being invoiced
         jpyc.approve(address(vault), 1_000e18);

@@ -2,13 +2,12 @@
 pragma solidity ^0.8.26;
 
 import {Vm} from "forge-std/Vm.sol";
-import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {TegataBase} from "./TegataBase.sol";
 import {InvoiceRegistry} from "../src/rwa/InvoiceRegistry.sol";
 import {InvoiceToken} from "../src/rwa/InvoiceToken.sol";
 
-/// RWA controls: invoice tokens only move to eligible holders (ERC-3643 style), and every invoice carries its
-/// real-world details on-chain (reference number, parties, terms, live price) as JSON via contractURI (ERC-7572).
+/// Open access: anyone can register, hold and trade invoices (no KYB/KYC). Every invoice carries its real-world
+/// details on-chain (reference number, parties, terms, live price) as JSON via contractURI (ERC-7572).
 contract RwaComplianceTest is TegataBase {
     address outsider = makeAddr("anonymous wallet");
 
@@ -24,58 +23,31 @@ contract RwaComplianceTest is TegataBase {
         return false;
     }
 
-    // ---------------------------------------------------------------- holder policy
-    function test_transferToUnapprovedWalletReverts() public {
+    // ---------------------------------------------------------------- open access (no KYB / KYC)
+    function test_transferToAnyWalletWorks() public {
         vm.prank(supplier);
-        vm.expectRevert(abi.encodeWithSelector(InvoiceToken.NotEligible.selector, outsider));
         token.transfer(outsider, 1_000e18);
+        assertEq(token.balanceOf(outsider), 1_000e18);
     }
 
-    function test_transferToApprovedInvestorWorks() public {
-        vm.prank(supplier);
-        token.transfer(investor, 1_000e18);
-        assertEq(token.balanceOf(investor), 1_000e18);
-    }
-
-    function test_unapprovedWalletCannotBuyFromPool() public {
+    function test_anyWalletCanBuyFromPool() public {
         _sellInvoice(supplier, 100_000e18); // pool now holds invoice tokens
         jpyc.mint(outsider, 10_000e18);
         vm.prank(outsider);
         jpyc.approve(address(swapRouter), type(uint256).max);
-        vm.expectRevert(); // PoolManager.take -> InvoiceToken.transfer -> NotEligible(outsider)
-        _buyInvoice(outsider, 1_000e18);
-
-        // After the operator approves the investor (KYC), the same purchase goes through.
-        vm.prank(operator);
-        registry.approveInvestor(outsider, true);
         _buyInvoice(outsider, 1_000e18);
         assertGt(token.balanceOf(outsider), 0);
     }
 
-    function test_revokedInvestorCannotReceiveMore() public {
-        vm.prank(supplier);
-        token.transfer(investor, 1_000e18);
-        vm.prank(operator);
-        registry.approveInvestor(investor, false);
-        vm.prank(supplier);
-        vm.expectRevert(abi.encodeWithSelector(InvoiceToken.NotEligible.selector, investor));
-        token.transfer(investor, 1_000e18);
-        // Existing holdings stay redeemable: redemption burns, it does not transfer.
-        assertEq(token.balanceOf(investor), 1_000e18);
-    }
-
-    function test_onlyOperatorManagesHolderPolicy() public {
-        bytes32 role = registry.OPERATOR_ROLE();
+    function test_companyNameIsSelfDeclared() public {
+        vm.recordLogs();
         vm.prank(outsider);
-        vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, outsider, role));
-        registry.approveInvestor(outsider, true);
-    }
-
-    function test_canHoldRules() public view {
-        assertTrue(registry.canHold(supplier)); // KYB-verified company
-        assertTrue(registry.canHold(investor)); // approved investor
-        assertTrue(registry.canHold(address(manager))); // venue: Uniswap v4 PoolManager
-        assertFalse(registry.canHold(outsider));
+        registry.setCompanyName("Outsider KK");
+        assertEq(registry.companyName(outsider), "Outsider KK");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 1);
+        assertEq(logs[0].topics[0], InvoiceRegistry.CompanyNamed.selector);
+        assertEq(logs[0].topics[1], bytes32(uint256(uint160(outsider))));
     }
 
     // ---------------------------------------------------------------- on-chain invoice details
@@ -126,10 +98,10 @@ contract RwaComplianceTest is TegataBase {
 
     function test_jsonEscapesQuotes() public {
         address q = makeAddr("quoted");
-        vm.startPrank(operator);
-        registry.verifyCompany(q, keccak256("corp:q"), 'Evil "Co" \\ KK');
+        vm.prank(q);
+        registry.setCompanyName('Evil "Co" \\ KK');
+        vm.prank(operator);
         risk.rate(q, 2);
-        vm.stopPrank();
         vm.prank(supplier);
         uint256 id2 = registry.registerInvoice(q, 5_000e18, maturity, keccak256("q"), "Q-1");
         string memory json = registry.invoiceMetadata(id2);

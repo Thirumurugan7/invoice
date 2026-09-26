@@ -20,10 +20,10 @@ import {
   type WalletInfo,
 } from './chain';
 import { jst, short, yen } from './errors';
-import { ActivityPage, BookPage, DebtorPage, InvestorPage, OperatorPage, PermissionsPage, SupplierPage } from './pages';
+import { ActivityPage, BookPage, DebtorPage, InvestorPage, OperatorPage, PermissionsPage, PlaybookPage, SupplierPage } from './pages';
 import { useBook, useTx, type Book, type TxStatus } from './state';
 
-const TABS = ['Book', 'Invoices', 'Marketplace', 'Sell', 'Invest', 'Permissions', 'Activity', 'Operator'] as const;
+const TABS = ['Book', 'Invoices', 'Marketplace', 'Sell', 'Invest', 'Permissions', 'Activity', 'Playbook', 'Operator'] as const;
 type Tab = (typeof TABS)[number];
 const TAB_LABEL: Record<Tab, string> = {
   Book: 'Dashboard',
@@ -33,6 +33,7 @@ const TAB_LABEL: Record<Tab, string> = {
   Invest: 'Invest',
   Permissions: 'Wallet & Permissions',
   Activity: 'Transaction Activity',
+  Playbook: 'Playbook',
   Operator: 'Admin Console',
 };
 const TAB_ICON: Record<Tab, JSX.Element> = {
@@ -70,6 +71,11 @@ const TAB_ICON: Record<Tab, JSX.Element> = {
   Activity: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <path d="M4 6h16" /><path d="M4 12h16" /><path d="M4 18h10" /><path d="M17 16l2 2 3-4" />
+    </svg>
+  ),
+  Playbook: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5 4.5h10a3 3 0 0 1 3 3v12H8a3 3 0 0 1-3-3z" /><path d="M8 19.5a3 3 0 0 1 0-6h10" /><path d="M9 8h5" />
     </svg>
   ),
   Operator: (
@@ -194,7 +200,7 @@ export default function App() {
     const me = s.account.toLowerCase();
     if (book.me.isOperator) setTab('Operator');
     else if (book.invoices.some((i) => i.debtor.toLowerCase() === me)) setTab('Invoices');
-    else if (book.me.verified) setTab('Sell');
+    else if (book.me.name || book.invoices.some((i) => i.supplier.toLowerCase() === me)) setTab('Sell');
     else setTab('Invest');
   }, [book, s]);
 
@@ -206,6 +212,7 @@ export default function App() {
     if (!value) return;
     if (/permission|wallet|sign/.test(value)) setTab('Permissions');
     else if (/activity|transaction|settlement/.test(value)) setTab('Activity');
+    else if (/playbook|chat|assistant|action/.test(value)) setTab('Playbook');
     else if (/admin|operator|company|credit/.test(value)) setTab('Operator');
     else if (/sell|upload|early/.test(value)) setTab('Sell');
     else if (/invest|bid|market|buyer/.test(value)) setTab('Marketplace');
@@ -324,6 +331,7 @@ export default function App() {
             {tab === 'Invest' && <InvestorPage dep={dep} s={s} book={book} send={send} />}
             {tab === 'Permissions' && <PermissionsPage dep={dep} s={s} book={book} send={send} />}
             {tab === 'Activity' && <ActivityPage dep={dep} s={s} book={book} send={send} />}
+            {tab === 'Playbook' && <PlaybookPage dep={dep} s={s} book={book} send={send} />}
             {tab === 'Book' && <BookPage dep={dep} s={s} book={book} send={send} onViewAll={() => setTab('Marketplace')} />}
             {tab === 'Operator' && <OperatorPage dep={dep} s={s} book={book} send={send} />}
           </main>
@@ -335,15 +343,13 @@ export default function App() {
 
 type Send = (label: string, address: Address, abi: readonly unknown[], fn: string, args: unknown[]) => Promise<void>;
 
-/// Who this wallet is on-chain, and what it needs before it can act: gas, JPYC (official faucet), KYB.
+/// Who this wallet is on-chain, and what it needs before it can act: gas and JPYC.
 function WalletPanel({ dep, s, book, send }: { dep: Deployment; s: Session; book: Book; send: Send }) {
   const role = book.me.isOperator
     ? 'Operator access active'
-    : book.me.verified
-      ? `KYB-verified: ${book.me.name}`
-      : book.me.approvedInvestor
-        ? 'Approved investor (KYC) — may hold invoices'
-        : 'Under review — the operator must approve this wallet before it can hold invoices';
+    : book.me.name
+      ? `${book.me.name} · open-access account`
+      : 'Open-access account · add a company name from the invoice screen';
   const canClaim = book.me.jpyc <= 1_000_000n * 10n ** 18n;
   return (
     <section className="card wallet-panel">
@@ -370,12 +376,7 @@ function WalletPanel({ dep, s, book, send }: { dep: Deployment; s: Session; book
           Get test JPYC
         </button>
       </div>
-      {!book.me.canHold && !book.me.isOperator && (
-        <div className="muted small-text">
-          Send this address to the operator: KYB (supplier/debtor) or investor approval, in the Operator tab or <span className="mono">npm run operator</span> via MultiBaas.{' '}
-          <button className="ghost small" onClick={() => navigator.clipboard?.writeText(s.account)}>Copy address</button>
-        </div>
-      )}
+      <button className="ghost small" onClick={() => navigator.clipboard?.writeText(s.account)}>Copy address</button>
       {dep && null}
     </section>
   );

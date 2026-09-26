@@ -26,8 +26,8 @@ import {InvoiceToken} from "../src/rwa/InvoiceToken.sol";
 import {MockJPYC} from "../src/rwa/MockJPYC.sol";
 import {MaturityCurveHook} from "../src/hook/MaturityCurveHook.sol";
 
-/// Fixture: operator verifies a supplier (下請 Sakura Seiko) and a debtor (Tokyo Motors); the supplier registers
-/// a ¥1,000,000 invoice due in 90 days. The debtor is rated grade 2 (1% base + 2% spread = 3% discount rate); the debtor accepts; an investor posts JPYC bids along
+/// Fixture: a supplier (下請 Sakura Seiko) and a debtor (Tokyo Motors) name themselves (no KYB); the supplier
+/// registers a ¥1,000,000 invoice due in 90 days. The debtor is rated grade 2 (1% base + 2% spread = 3% discount rate); the debtor accepts; an investor posts JPYC bids along
 /// the curve in a hooked Uniswap v4 pool.
 abstract contract TegataBase is Test {
     using StateLibrary for IPoolManager;
@@ -76,15 +76,15 @@ abstract contract TegataBase is Test {
         swapRouter = new PoolSwapTest(manager);
 
         vm.startPrank(operator);
-        registry.verifyCompany(supplier, keccak256("corp:1010001000001"), unicode"株式会社さくら精工");
-        registry.verifyCompany(debtor, keccak256("corp:2010001000002"), unicode"東京モーターズ株式会社");
         risk.setRegistry(address(registry));
         risk.setVault(address(vault));
         vault.setRegistry(address(registry));
         risk.rate(debtor, DEBTOR_GRADE);
-        registry.setVenue(address(manager), true); // the Uniswap v4 PoolManager custodies pool balances
-        registry.approveInvestor(investor, true);
         vm.stopPrank();
+        vm.prank(supplier);
+        registry.setCompanyName(unicode"株式会社さくら精工");
+        vm.prank(debtor);
+        registry.setCompanyName(unicode"東京モーターズ株式会社");
 
         maturity = uint64(block.timestamp + 90 days);
         vm.prank(supplier);

@@ -17,7 +17,10 @@ export type InvoiceRow = {
   maturity: number;
   rateBps: number; // debtor's live rate (CreditRiskModel)
   rateAtIssueBps: number;
-  debtorGrade: number;
+  debtorGrade: number; // grade that prices the debtor (unrated = G5)
+  debtorRated: boolean; // rated by the operator
+  supplierRated: boolean;
+  acceptNeed: bigint; // pending only: collateral the debtor must hold to accept
   debtorCoverageBps: number; // collateral / outstanding
   frozen: boolean;
   status: number;
@@ -34,9 +37,30 @@ export type InvoiceRow = {
 export type Book = {
   chainTime: number;
   invoices: InvoiceRow[];
-  me: { eth: bigint; jpyc: bigint; grade: number; outstanding: bigint; collateral: bigint; collateralRequired: bigint; coverageBps: number; jpycAllowanceVault: bigint; canHold: boolean; approvedInvestor: boolean; verified: boolean; name: string; isOperator: boolean; jpycAllowanceMarket: bigint; jpycAllowanceRegistry: bigint };
+  me: {
+    eth: bigint;
+    jpyc: bigint;
+    grade: number; // grade that prices this wallet as a debtor (unrated = G5)
+    rated: boolean;
+    outstanding: bigint;
+    collateral: bigint;
+    collateralRequired: bigint;
+    requiredBps: number; // collateral share required to accept (by grade; unrated = index 0)
+    locked: bigint; // collateral backing accepted, unpaid invoices (can't be withdrawn)
+    stake: bigint; // collateral earning interest
+    coverageBps: number;
+    interest: bigint; // accrued, unclaimed collateral interest
+    jpycAllowanceVault: bigint;
+    name: string; // self-declared
+    isOperator: boolean;
+    jpycAllowanceMarket: bigint;
+    jpycAllowanceRegistry: bigint;
+  };
   bandBps: bigint;
   baseRateBps: number;
+  aprBps: number; // collateral interest
+  requiredByGrade: number[]; // collateral share (bps) required to accept, by grade; index 0 = unrated
+  rewardReserve: bigint; // JPYC available to pay collateral interest
 };
 
 export function useBook(dep: Deployment | undefined, s: Session | undefined, tick: number) {
@@ -52,9 +76,8 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
       const now = Number(block.timestamp);
       const count = Number(await r(dep.registry, ABI.registry, 'invoiceCount'));
       const opRole = await r(dep.registry, ABI.registry, 'OPERATOR_ROLE');
-      const [jpyc, verified, name, isOperator, aMarket, aRegistry, bandBps] = await Promise.all([
+      const [jpyc, name, isOperator, aMarket, aRegistry, bandBps] = await Promise.all([
         r(dep.jpyc, ABI.jpyc, 'balanceOf', [s.account]),
-        r(dep.registry, ABI.registry, 'isVerified', [s.account]),
         r(dep.registry, ABI.registry, 'companyName', [s.account]),
         r(dep.registry, ABI.registry, 'hasRole', [opRole, s.account]),
         r(dep.jpyc, ABI.jpyc, 'allowance', [s.account, dep.market]),
@@ -63,17 +86,23 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
       ]);
       const baseRateBps = Number(await r(dep.risk, ABI.risk, 'baseRateBps'));
       const eth = await s.pub.getBalance({ address: s.account });
-      const [grade, outstanding, collateral, collateralRequired, coverageBps, aVault] = await Promise.all([
-        r(dep.risk, ABI.risk, 'gradeOf', [s.account]),
+      const [grade, rated, outstanding, collateral, collateralRequired, coverageBps, aVault, interest, aprBps, rewardReserve] = await Promise.all([
+        r(dep.risk, ABI.risk, 'gradeFor', [s.account]),
+        r(dep.risk, ABI.risk, 'isRated', [s.account]),
         r(dep.registry, ABI.registry, 'outstandingOf', [s.account]),
         r(dep.vault, ABI.vault, 'collateralOf', [s.account]),
         r(dep.vault, ABI.vault, 'required', [s.account, 0n]),
         r(dep.vault, ABI.vault, 'coverageBps', [s.account]),
         r(dep.jpyc, ABI.jpyc, 'allowance', [s.account, dep.vault]),
+        r(dep.vault, ABI.vault, 'interestOf', [s.account]),
+        r(dep.vault, ABI.vault, 'aprBps'),
+        r(dep.vault, ABI.vault, 'rewardReserve'),
       ]);
-      const [canHold, approvedInvestor] = await Promise.all([
-        r(dep.registry, ABI.registry, 'canHold', [s.account]),
-        r(dep.registry, ABI.registry, 'approvedInvestor', [s.account]),
+      const requiredByGrade = (await Promise.all([0, 1, 2, 3, 4, 5].map((g) => r(dep.vault, ABI.vault, 'requiredBps', [BigInt(g)])))).map(Number);
+      const [requiredBps, locked, stake] = await Promise.all([
+        r(dep.vault, ABI.vault, 'requiredBpsFor', [s.account]).then(Number),
+        r(dep.vault, ABI.vault, 'lockedOf', [s.account]),
+        r(dep.vault, ABI.vault, 'stakeOf', [s.account]),
       ]);
       const pids = (await r(dep.market, ABI.market, 'positionsOf', [s.account])) as bigint[];
       const positions = await Promise.all(
@@ -85,7 +114,7 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
       const invoices: InvoiceRow[] = [];
       for (let id = 1; id <= count; id++) {
         const inv = await r(dep.registry, ABI.registry, 'invoice', [BigInt(id)]);
-        const [fair, tradable, poolCreated, supplierName, debtorName, myTokens, rateBps, debtorGrade, ref, debtorCoverage] = await Promise.all([
+        const [fair, tradable, poolCreated, supplierName, debtorName, myTokens, rateBps, debtorGrade, ref, debtorCoverage, debtorRated] = await Promise.all([
           r(dep.registry, ABI.registry, 'fairPrice', [BigInt(id), BigInt(now)]),
           r(dep.registry, ABI.registry, 'isTradable', [BigInt(id)]),
           inv.status >= 2 ? r(dep.market, ABI.market, 'isPoolCreated', [BigInt(id)]).catch(() => false) : Promise.resolve(false),
@@ -93,9 +122,14 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
           r(dep.registry, ABI.registry, 'companyName', [inv.debtor]),
           r(inv.token, ABI.token, 'balanceOf', [s.account]),
           r(dep.registry, ABI.registry, 'rateOf', [BigInt(id)]),
-          r(dep.risk, ABI.risk, 'gradeOf', [inv.debtor]),
+          r(dep.risk, ABI.risk, 'gradeFor', [inv.debtor]),
           r(dep.registry, ABI.registry, 'invoiceRef', [BigInt(id)]),
           r(dep.vault, ABI.vault, 'coverageBps', [inv.debtor]),
+          r(dep.risk, ABI.risk, 'isRated', [inv.debtor]),
+        ]);
+        const [supplierRated, acceptNeed] = await Promise.all([
+          r(dep.risk, ABI.risk, 'isRated', [inv.supplier]),
+          Number(inv.status) === 1 ? r(dep.vault, ABI.vault, 'required', [inv.debtor, inv.face]) : Promise.resolve(0n),
         ]);
         let poolPrice: bigint | undefined;
         let deviationBps: bigint | undefined;
@@ -117,6 +151,9 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
           rateBps: Number(rateBps),
           rateAtIssueBps: Number(inv.rateAtIssueBps),
           debtorGrade: Number(debtorGrade),
+          debtorRated,
+          supplierRated,
+          acceptNeed,
           debtorCoverageBps: Number(debtorCoverage),
           frozen: inv.frozen,
           status: Number(inv.status),
@@ -131,7 +168,34 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
         });
       }
       if (!live) return;
-      setBook({ chainTime: now, invoices, bandBps, baseRateBps, me: { eth, jpyc, grade: Number(grade), outstanding, collateral, collateralRequired, coverageBps: Number(coverageBps), jpycAllowanceVault: aVault, canHold, approvedInvestor, verified, name, isOperator, jpycAllowanceMarket: aMarket, jpycAllowanceRegistry: aRegistry } });
+      setBook({
+        chainTime: now,
+        invoices,
+        bandBps,
+        baseRateBps,
+        aprBps: Number(aprBps),
+        requiredByGrade,
+        rewardReserve,
+        me: {
+          eth,
+          jpyc,
+          grade: Number(grade),
+          rated,
+          outstanding,
+          collateral,
+          collateralRequired,
+          requiredBps,
+          locked,
+          stake,
+          coverageBps: Number(coverageBps),
+          interest,
+          jpycAllowanceVault: aVault,
+          name,
+          isOperator,
+          jpycAllowanceMarket: aMarket,
+          jpycAllowanceRegistry: aRegistry,
+        },
+      });
       setErr(undefined);
     };
     load().catch((e) => live && setErr(String(e?.shortMessage ?? e?.message ?? e)));
