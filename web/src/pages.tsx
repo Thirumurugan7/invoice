@@ -264,7 +264,7 @@ export function DebtorPage({ dep, s, book, send }: Props) {
           </h3>
           <p className="muted">from {inv.supplierName || short(inv.supplier)} · due {jst(inv.maturity)}</p>
           <p>
-            Face {yen(inv.face)} · funded {yen(inv.funded)}
+            Face {yen(inv.face)} · you have repaid {yen(inv.funded)}
           </p>
           {inv.status === 1 && (
             <div className="row">
@@ -603,7 +603,7 @@ type WorkflowContext = {
   buyer: string;
   buyerGrade: string;
   faceValue: string;
-  funded: string;
+  repaid: string;
   dueDate: string;
 };
 
@@ -613,7 +613,7 @@ const workflowPrompt = (item: WorkflowContext) => [
   `Supplier: ${item.supplier}`,
   `Buyer: ${item.buyer} (${item.buyerGrade})`,
   `Face value: ${item.faceValue}`,
-  `Funded: ${item.funded}`,
+  `Repaid by buyer: ${item.repaid}`,
   `Due date: ${item.dueDate}`,
   '',
   'Return only valid JSON with this exact shape:',
@@ -632,7 +632,7 @@ function invoiceWorkflowContext(invoice: InvoiceRow, book: Book, stage: string, 
     buyer: invoice.debtorName || short(invoice.debtor),
     buyerGrade: `Grade ${invoice.debtorGrade}`,
     faceValue: yen(invoice.face),
-    funded: yen(invoice.funded),
+    repaid: yen(invoice.funded),
     dueDate: jst(invoice.maturity),
   };
 }
@@ -677,7 +677,7 @@ function MaturityBoard({ book, selected, onSelect }: { book: Book; selected?: Wo
       start: Math.max(0, Math.min(columnCount - 1, todayIndex)),
       end: Math.max(0, Math.min(columnCount - 1, Math.max(todayIndex, dueIndex))),
       tone: invoice.frozen ? 'purple' : invoice.status === 1 ? 'blue' : 'green',
-      label: invoice.frozen ? 'Under review' : invoice.status === 1 ? 'Awaiting buyer approval' : funding > 0 ? `${funding}% funded` : 'Open for investor bids',
+      label: invoice.frozen ? 'Under review' : invoice.status === 1 ? 'Awaiting buyer approval' : funding > 0 ? `${funding}% repaid` : invoice.poolCreated ? 'Open for investors' : 'Approved, not yet listed',
       status: isOverdue ? 'Overdue' : `${Math.max(0, Math.ceil((invoice.maturity - book.chainTime) / 86400))}d to due`,
     };
   });
@@ -701,7 +701,7 @@ function MaturityBoard({ book, selected, onSelect }: { book: Book; selected?: Wo
           <select className="calendar-filter" aria-label="Filter calendar invoices" value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}>
             <option value="open">All open</option>
             <option value="pending">Pending approval</option>
-            <option value="funded">Funded</option>
+            <option value="funded">Partly repaid</option>
             <option value="review">Under review</option>
           </select>
           <button className="ghost" onClick={() => setShowAll((value) => !value)}>{showAll ? 'Compact view' : 'View all'}</button>
@@ -814,7 +814,7 @@ function DashboardActions({ book, s, onSelect }: { book: Book; s: Session; onSel
         .map((invoice) => ({
           invoice,
           label: invoice.status === 1 ? 'Follow up with buyer' : invoice.poolCreated ? 'Review funding' : 'Open investor bidding',
-          detail: invoice.status === 1 ? 'Awaiting acceptance' : `${yen(invoice.face - invoice.funded)} available`,
+          detail: invoice.status === 1 ? 'Awaiting acceptance' : `${yen(invoice.face - invoice.funded)} outstanding`,
         }))
       : book.invoices
         .filter((invoice) => invoice.status === 1 || invoice.frozen || (invoice.status === 2 && book.chainTime > invoice.maturity))
@@ -1065,7 +1065,7 @@ function portfolioSnapshot(book: Book) {
       buyer: invoice.debtorName || short(invoice.debtor),
       buyerGrade: invoice.debtorGrade,
       faceValue: yen(invoice.face),
-      funded: yen(invoice.funded),
+      repaid: yen(invoice.funded),
       maturity: jst(invoice.maturity),
       daysToMaturity: Math.ceil((invoice.maturity - book.chainTime) / 86400),
       status: STATUS[invoice.status] || 'Unknown',
