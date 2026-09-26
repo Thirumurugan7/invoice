@@ -8,7 +8,7 @@
 //   npm run operator -- rate <debtor> <grade 1..5>      (CreditRiskModel: reprices all the debtor's invoices)
 //   npm run operator -- base <bps>                      (CreditRiskModel base rate)
 //   npm run operator -- apr <bps>                       (CollateralVault: APR paid on locked collateral, max 2000)
-//   npm run operator -- require <grade 1..5> <bps>      (CollateralVault: mandatory collateral for a grade; 0 = optional)
+//   npm run operator -- require <grade 0..5> <bps>      (CollateralVault: collateral needed to ACCEPT; grade 0 = unrated)
 //   npm run operator -- wallets
 import * as MultiBaas from '@curvegrid/multibaas-sdk';
 import { privateKeyToAccount } from 'viem/accounts';

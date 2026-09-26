@@ -19,10 +19,11 @@ import {InvoiceToken} from "../src/rwa/InvoiceToken.sol";
 import {CollateralVault} from "../src/rwa/CollateralVault.sol";
 import {TegataMarket} from "../src/periphery/TegataMarket.sol";
 
-/// Adversarial end-to-end cases for the open-access deployment, configured like live Sepolia: no KYB/KYC, collateral
-/// optional for every grade (0%), 3% APR from a ¥200,000 reward pool.
-///   test_BREAK_*  proof-of-concept: the test PASSES when the attack or failure SUCCEEDS.
-///   test_HOLDS_*  the protection works.
+/// Adversarial end-to-end cases for the open-access deployment, configured like live Sepolia: no KYB/KYC, unrated
+/// debtors must lock 20% to accept, rated grades optional, 3% APR from a ¥200,000 reward pool.
+///   test_FIXED_*     an attack found earlier; the test PASSES when the attack now FAILS.
+///   test_RESIDUAL_*  still possible by design or not yet fixed; the test PASSES when the attack still WORKS.
+///   test_HOLDS_*     a protection that works.
 contract EdgeCasesTest is TegataBase {
     TegataMarket market;
     address mallory = makeAddr("mallory (attacker, supplier wallet)");
@@ -34,12 +35,11 @@ contract EdgeCasesTest is TegataBase {
         market = new TegataMarket(manager, registry, IHooks(address(hook)), jpyc);
         jpyc.mint(operator, 200_000e18);
         vm.startPrank(operator);
-        vault.setRequiredBps(4, 0); // live config: collateral optional
-        vault.setRequiredBps(5, 0);
         vault.setAprBps(300);
         jpyc.approve(address(vault), type(uint256).max);
         vault.fundRewards(200_000e18);
         vm.stopPrank();
+        assertEq(vault.requiredBps(0), 2_000); // unrated: 20% to accept
         address[4] memory who = [mallory, sybil, victim, debtor];
         for (uint256 i; i < who.length; i++) {
             jpyc.mint(who[i], 20_000_000e18);
@@ -70,134 +70,173 @@ contract EdgeCasesTest is TegataBase {
         return false;
     }
 
-    // ============================================================== BREAKS
+    // ============================================================== 1. self-dealing fraud (critical)
 
-    /// 1. Self-dealing fraud. One person controls a "supplier" and a "debtor" wallet, invoices themselves, accepts,
-    ///    sells the tokens to investors, never pays. No KYB, no required collateral: investors lose everything.
-    ///    The G5 rate (17%/yr) only discounts ~4% over 90 days; it doesn't price a ~100% fraud loss.
-    function test_BREAK_selfDealtInvoiceDrainsInvestors() public {
-        vm.prank(sybil);
-        registry.setCompanyName(unicode"トヨタ自動車株式会社 (Toyota)"); // self-declared, unverified
+    /// With 20% collateral at acceptance the fraudster must put money at risk, and holders recover the seized 20%.
+    /// It still pays: sell more than the collateral, never pay. The chosen fix limits, not prevents, this.
+    function test_RESIDUAL_selfDealtFraudStillPaysAboveTheCollateral() public {
         uint256 id = _register(mallory, sybil, 1_000_000e18, maturity, "FAKE-001");
         vm.prank(sybil);
+        vm.expectRevert(abi.encodeWithSelector(InvoiceRegistry.CollateralRequired.selector, sybil, 200_000e18, 0));
+        registry.acceptInvoice(id); // can't accept for free any more
+        vm.startPrank(sybil);
+        vault.deposit(200_000e18);
         registry.acceptInvoice(id);
+        vm.stopPrank();
 
         market.createPool(id);
         vm.prank(victim);
         (uint256 pos,) = market.postBids(id, 600_000e18, 0, 150, _dl());
-
         InvoiceToken t = registry.invoice(id).token;
-        uint256 before = jpyc.balanceOf(mallory);
+        uint256 start = jpyc.balanceOf(mallory) + jpyc.balanceOf(sybil) + 200_000e18; // incl. locked collateral
         vm.startPrank(mallory);
         t.approve(address(market), type(uint256).max);
         market.sell(id, 500_000e18, 0, _dl());
         vm.stopPrank();
-        uint256 stolen = jpyc.balanceOf(mallory) - before;
 
         vm.warp(maturity + 3 days);
-        registry.markDefault(id);
+        registry.markDefault(id); // seizes the 200,000
         vm.startPrank(victim);
         market.withdrawBids(pos, _dl());
-        uint256 held = t.balanceOf(victim);
-        uint256 recovered = registry.redeem(id, held);
+        uint256 victimTokens = t.balanceOf(victim);
+        uint256 victimGot = registry.redeem(id, victimTokens);
         vm.stopPrank();
+        uint256 kept = t.balanceOf(mallory);
+        vm.prank(mallory);
+        registry.redeem(id, kept); // the fraudster redeems its own unsold half too
+        uint256 end = jpyc.balanceOf(mallory) + jpyc.balanceOf(sybil);
 
-        emit log_named_decimal_uint("attacker walked away with JPYC", stolen, 18);
-        emit log_named_decimal_uint("victim paid for face          ", held, 18);
-        emit log_named_decimal_uint("victim recovered              ", recovered, 18);
-        assertGt(stolen, 470_000e18);
-        assertEq(recovered, 0);
+        emit log_named_decimal_uint("victim paid for face ", victimTokens, 18);
+        emit log_named_decimal_uint("victim recovered     ", victimGot, 18);
+        emit log_named_decimal_uint("fraudster net profit ", end - start, 18);
+        assertEq(victimGot, victimTokens / 5); // 20% recovery (was 0%)
+        assertGt(end, start); // still profitable
     }
 
-    /// 2. Name impersonation: any wallet can claim any company's name, including a rated debtor's exact name.
-    function test_BREAK_anyoneCanClaimAnyCompanyName() public {
+    // ============================================================== 2. names (critical)
+
+    function test_FIXED_exactNameCannotBeTaken() public {
         vm.prank(sybil);
+        vm.expectRevert(abi.encodeWithSelector(InvoiceRegistry.NameTaken.selector, debtor));
         registry.setCompanyName(unicode"東京モーターズ株式会社");
-        assertEq(registry.companyName(sybil), registry.companyName(debtor));
     }
 
-    /// 3. Griefing: a pending invoice counts toward the debtor's outstanding. One huge pending invoice against any
-    ///    company overflows `outstandingOf`, so NOBODY can invoice that company until it notices and rejects.
-    function test_BREAK_pendingInvoiceSpamBlocksAnyDebtor() public {
-        uint256 room = type(uint256).max - registry.outstandingOf(debtor);
-        _register(mallory, debtor, room, maturity, "GRIEF-1");
-        vm.prank(supplier);
-        vm.expectRevert(stdError.arithmeticError);
-        registry.registerInvoice(debtor, 1_000e18, maturity, keccak256("legit"), "LEGIT-1");
+    function test_HOLDS_operatorCanTakeDownAName() public {
+        vm.prank(sybil);
+        registry.setCompanyName(unicode"トヨタ自動車株式会社");
+        vm.prank(operator);
+        registry.clearCompanyName(sybil);
+        address toyota = makeAddr("the real Toyota");
+        vm.prank(toyota);
+        registry.setCompanyName(unicode"トヨタ自動車株式会社"); // freed for its rightful owner
+        assertEq(registry.companyName(sybil), "");
+    }
 
+    function test_HOLDS_renamingFreesTheOldName() public {
+        vm.startPrank(sybil);
+        registry.setCompanyName("Old KK");
+        registry.setCompanyName("New KK");
+        vm.stopPrank();
+        vm.prank(mallory);
+        registry.setCompanyName("Old KK");
+    }
+
+    /// Uniqueness is exact-match only: a look-alike (trailing space, full-width letters) still gets through. Names
+    /// stay self-declared; the app marks unrated companies "unverified".
+    function test_RESIDUAL_lookAlikeNamesStillAllowed() public {
+        vm.prank(sybil);
+        registry.setCompanyName(unicode"東京モーターズ株式会社 ");
+    }
+
+    // ============================================================== 3–4. pending-invoice spam (high)
+
+    function test_FIXED_pendingSpamCannotBlockADebtor() public {
+        vm.prank(mallory);
+        vm.expectRevert(InvoiceRegistry.InvalidTerms.selector);
+        registry.registerInvoice(debtor, type(uint256).max, maturity, keccak256("huge"), "");
+        uint256 max = registry.MAX_FACE();
+        for (uint256 i; i < 3; i++) _register(mallory, debtor, max, maturity, string.concat("SPAM-", vm.toString(i)));
+        assertEq(registry.outstandingOf(debtor), FACE); // only the accepted invoice counts
+        uint256 id = _register(supplier, debtor, 1_000e18, maturity, "LEGIT-1");
         vm.prank(debtor);
-        registry.rejectInvoice(2, "spam"); // the only way out, one invoice at a time
-        _register(supplier, debtor, 1_000e18, maturity, "LEGIT-1");
+        registry.acceptInvoice(id);
     }
 
-    /// 4. Rate manipulation: collateral coverage = collateral / outstanding, and pending (unaccepted) invoices count.
-    ///    A stranger's pending invoice wipes out a debtor's collateral discount and reprices ALL its live invoices.
-    function test_BREAK_pendingSpamRepricesCollateralizedDebtor() public {
+    function test_FIXED_pendingSpamCannotRepriceADebtor() public {
         vm.prank(debtor);
         vault.deposit(1_000_000e18); // 100% coverage -> −2%, floored at the 1% base
-        uint256 fairBefore = registry.fairPrice(invoiceId, block.timestamp);
         assertEq(registry.rateOf(invoiceId), 100);
-
-        _register(mallory, debtor, 1e30, maturity, "GRIEF-2"); // never accepted
-        assertEq(registry.rateOf(invoiceId), 300);
-        assertLt(registry.fairPrice(invoiceId, block.timestamp), fairBefore);
+        _register(mallory, debtor, registry.MAX_FACE(), maturity, "GRIEF-2"); // never accepted
+        assertEq(registry.rateOf(invoiceId), 100);
     }
 
-    /// 5. Document-hash squatting: the hash is public in the mempool. Anyone can front-run a registration with the same
-    ///    docHash; even after the debtor rejects the fake, the hash stays burned, so the real invoice can never be
-    ///    registered. (Also hits honest mistakes: a rejected invoice's PDF can't be re-registered.)
-    function test_BREAK_docHashSquattingBlocksRealInvoiceForever() public {
+    // ============================================================== 5. document hash (high)
+
+    function test_FIXED_frontRunningADocHashDoesNotBlockTheRealInvoice() public {
         bytes32 doc = keccak256("real-invoice.pdf");
-        vm.prank(mallory); // front-runs Sakura's pending tx
-        uint256 fake = registry.registerInvoice(debtor, 1e18, maturity, doc, "");
-        vm.prank(debtor);
-        registry.rejectInvoice(fake, "not ours");
-
+        vm.prank(mallory); // front-runs Sakura's pending tx with the same hash
+        registry.registerInvoice(debtor, 1e18, maturity, doc, "");
         vm.prank(supplier);
-        vm.expectRevert(abi.encodeWithSelector(InvoiceRegistry.DuplicateInvoice.selector, fake));
-        registry.registerInvoice(debtor, 500_000e18, maturity, doc, "SKR-REAL");
+        registry.registerInvoice(debtor, 500_000e18, maturity, doc, "SKR-REAL"); // unaffected
     }
 
-    /// 6. Optional collateral is not a commitment: it lowers the rate (investors pay more) and can be withdrawn the
-    ///    day before default, so nothing is seized.
-    function test_BREAK_collateralDiscountThenWithdrawBeforeDefault() public {
+    function test_HOLDS_sameSupplierCannotFinanceTheSameDocumentTwice() public {
+        vm.prank(supplier);
+        vm.expectRevert(abi.encodeWithSelector(InvoiceRegistry.DuplicateInvoice.selector, invoiceId));
+        registry.registerInvoice(debtor, FACE, maturity, DOC, ""); // 二重譲渡 still blocked
+    }
+
+    function test_FIXED_rejectedInvoiceCanBeCorrectedAndReRegistered() public {
+        bytes32 doc = keccak256("typo.pdf");
+        vm.prank(supplier);
+        uint256 id = registry.registerInvoice(debtor, 5_000e18, maturity, doc, "TYPO");
+        vm.prank(debtor);
+        registry.rejectInvoice(id, "wrong amount");
+        vm.prank(supplier);
+        registry.registerInvoice(debtor, 4_500e18, maturity, doc, "TYPO-FIXED");
+    }
+
+    // ============================================================== 6. collateral withdrawal (high)
+
+    function test_FIXED_collateralCannotBeWithdrawnBeforeDefault() public {
         uint256 id = _register(mallory, sybil, 1_000_000e18, maturity, "COL-1");
-        vm.prank(sybil);
-        registry.acceptInvoice(id);
-        vm.prank(sybil);
+        vm.startPrank(sybil);
         vault.deposit(1_000_000e18); // full coverage: 17% -> 15%
+        registry.acceptInvoice(id);
+        vm.stopPrank();
         assertEq(registry.rateOf(id), 1_500);
 
         vm.warp(maturity - 1 days);
         vm.prank(sybil);
-        vault.withdraw(1_000_000e18); // allowed: nothing is required
+        vm.expectRevert(abi.encodeWithSelector(CollateralVault.BelowRequired.selector, 1_000_000e18, 0));
+        vault.withdraw(1_000_000e18);
         vm.warp(maturity + 3 days);
         registry.markDefault(id);
-        assertEq(registry.invoice(id).funded, 0); // nothing seized for holders
+        assertEq(registry.invoice(id).funded, 1_000_000e18); // holders are made whole from the collateral
     }
 
-    /// 7. The reward pool pays anyone who parks JPYC, not just debtors: a whale with no invoices drains it.
-    function test_BREAK_rewardPoolDrainedByNonDebtor() public {
+    // ============================================================== 7. reward pool (high)
+
+    function test_FIXED_parkedJpycEarnsNoRewards() public {
         address whale = makeAddr("yield farmer, no invoices");
         jpyc.mint(whale, 10_000_000e18);
         vm.startPrank(whale);
         jpyc.approve(address(vault), type(uint256).max);
         vault.deposit(10_000_000e18);
         vm.stopPrank();
-        vm.prank(debtor);
-        vault.deposit(100_000e18); // a real debtor
-
         vm.warp(FRI_1000_JST + 365 days);
+        assertEq(vault.interestOf(whale), 0);
         vm.prank(whale);
-        assertEq(vault.claimInterest(), 200_000e18); // the whole pool
-        vm.prank(debtor);
-        vm.expectRevert(abi.encodeWithSelector(CollateralVault.NothingToClaim.selector, 3_000e18, 0));
+        vm.expectRevert(abi.encodeWithSelector(CollateralVault.NothingToClaim.selector, 0, 200_000e18));
         vault.claimInterest();
     }
 
-    /// 8. Credit farming: 10 self-invoices of 1 wei, paid on time, buy the maximum on-time credit (−1%) for gas only.
-    function test_BREAK_onTimeHistoryFarmedWithDustInvoices() public {
-        assertEq(risk.rateBps(sybil), 1_700);
+    // ============================================================== medium, not in scope of this fix
+
+    /// Credit farming: 10 self-invoices of 1 wei (with 1 wei of collateral), paid on time, earn the maximum −1%.
+    function test_RESIDUAL_onTimeHistoryFarmedWithDustInvoices() public {
+        vm.prank(sybil);
+        vault.deposit(10);
         for (uint256 i; i < 10; i++) {
             uint256 id = _register(mallory, sybil, 1, maturity, string.concat("DUST-", vm.toString(i)));
             vm.startPrank(sybil);
@@ -205,23 +244,26 @@ contract EdgeCasesTest is TegataBase {
             registry.pay(id, 1);
             vm.stopPrank();
         }
+        vm.prank(sybil);
+        vault.withdraw(10);
         assertEq(risk.rateBps(sybil), 1_600);
     }
 
-    /// 9. Reputation is per wallet: a debtor that defaulted just uses a fresh wallet and is priced like a clean one.
-    function test_BREAK_defaulterResetsHistoryWithNewWallet() public {
+    /// Reputation is per wallet: a debtor that defaulted uses a fresh wallet and is priced like a clean one.
+    function test_RESIDUAL_defaulterResetsHistoryWithNewWallet() public {
         uint256 id = _register(mallory, sybil, 1_000e18, maturity, "D-1");
-        vm.prank(sybil);
+        vm.startPrank(sybil);
+        vault.deposit(200e18);
         registry.acceptInvoice(id);
+        vm.stopPrank();
         vm.warp(maturity + 3 days);
         registry.markDefault(id);
         assertEq(risk.rateBps(sybil), 2_700); // 17% + 10% default penalty
         assertEq(risk.rateBps(makeAddr("sybil's next wallet")), 1_700);
     }
 
-    /// 10. The curve is only enforced in the hooked Tegata pool. Invoice tokens are plain ERC-20s, so anyone can open
-    ///     an unhooked Uniswap v4 pool (or use any DEX/OTC) and trade them at any price, e.g. 50% of face.
-    function test_BREAK_curveBypassedInUnhookedPool() public {
+    /// The curve is only enforced in the hooked Tegata pool; invoice tokens can be traded anywhere else at any price.
+    function test_RESIDUAL_curveBypassedInUnhookedPool() public {
         PoolKey memory k = _keyFor(address(token));
         k.hooks = IHooks(address(0));
         bool tokenIs0 = Currency.unwrap(k.currency0) == address(token);
@@ -250,23 +292,19 @@ contract EdgeCasesTest is TegataBase {
             PoolSwapTest.TestSettings(false, false),
             ""
         );
-        uint256 got = jpyc.balanceOf(supplier) - before;
-        emit log_named_decimal_uint("10,000 face sold off-curve for", got, 18);
-        assertLt(got, 5_100e18); // fair value on the curve is ~9,927
+        assertLt(jpyc.balanceOf(supplier) - before, 5_100e18); // fair value on the curve is ~9,927
     }
 
-    /// 11. On-chain metadata JSON only escapes `"` and `\`: a name with a newline makes contractURI invalid JSON
-    ///     (wallets/indexers/the app's record viewer fail to parse it).
-    function test_BREAK_controlCharactersBreakMetadataJson() public {
+    /// Metadata JSON only escapes `"` and `\`: a newline in a name makes contractURI invalid JSON.
+    function test_RESIDUAL_controlCharactersBreakMetadataJson() public {
         vm.prank(sybil);
         registry.setCompanyName("Evil\nCo");
         uint256 id = _register(mallory, sybil, 1_000e18, maturity, "JSON-1");
-        assertTrue(_contains(bytes(registry.invoiceMetadata(id)), bytes("Evil\nCo"))); // raw control char in a JSON string
+        assertTrue(_contains(bytes(registry.invoiceMetadata(id)), bytes("Evil\nCo")));
     }
 
-    /// 12. No recovery after default: once marked Defaulted, the debtor can't pay the rest, so holders are stuck with
-    ///     whatever was paid (plus seized collateral), even if the debtor wants to cure a day later.
-    function test_BREAK_debtorCannotPayAfterDefault() public {
+    /// No recovery path after default: the debtor can't pay the rest once an invoice is marked Defaulted.
+    function test_RESIDUAL_debtorCannotPayAfterDefault() public {
         vm.warp(maturity + 3 days);
         registry.markDefault(invoiceId);
         vm.prank(debtor);
@@ -275,6 +313,11 @@ contract EdgeCasesTest is TegataBase {
     }
 
     // ============================================================== HOLDS
+
+    function test_HOLDS_registrationIsNeverBlockedByTheDebtor() public {
+        address stranger = makeAddr("unrated debtor with no collateral");
+        _register(supplier, stranger, 1_000_000e18, maturity, "OPEN-1");
+    }
 
     function test_HOLDS_onlyTheNamedDebtorCanAccept() public {
         uint256 id = _register(mallory, debtor, 1_000e18, maturity, "H-1");
@@ -290,11 +333,15 @@ contract EdgeCasesTest is TegataBase {
         vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, mallory, op));
         registry.setFrozen(invoiceId, true);
         vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, mallory, op));
+        registry.clearCompanyName(debtor);
+        vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, mallory, op));
         risk.rate(mallory, 1);
         vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, mallory, op));
         vault.setAprBps(2_000);
         vm.expectRevert(CollateralVault.NotRegistry.selector);
         vault.seize(debtor, invoiceId, 1);
+        vm.expectRevert(CollateralVault.NotRegistry.selector);
+        vault.sync(debtor);
         vm.expectRevert(InvoiceToken.NotRegistry.selector);
         token.mint(mallory, 1e18);
         vm.expectRevert(InvoiceToken.NotRegistry.selector);
@@ -346,19 +393,20 @@ contract EdgeCasesTest is TegataBase {
     function test_HOLDS_vaultStaysSolventUnderAllFlows() public {
         vm.prank(debtor);
         vault.deposit(300_000e18);
-        vm.prank(sybil);
-        vault.deposit(50_000e18);
         uint256 id = _register(mallory, sybil, 100_000e18, maturity, "SOLV-1");
-        vm.prank(sybil);
+        vm.startPrank(sybil);
+        vault.deposit(50_000e18);
         registry.acceptInvoice(id);
+        vm.stopPrank();
         vm.warp(maturity + 3 days);
         registry.markDefault(id); // seizes sybil's 50,000
         vm.prank(sybil);
         vault.claimInterest();
-        vm.prank(debtor);
-        vault.withdraw(100_000e18);
-        vm.prank(debtor);
+        vm.startPrank(debtor);
+        registry.pay(invoiceId, FACE); // frees its collateral
+        vault.withdraw(300_000e18);
         vault.claimInterest();
+        vm.stopPrank();
         assertEq(jpyc.balanceOf(address(vault)), vault.totalCollateral() + vault.rewardReserve());
     }
 }

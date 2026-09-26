@@ -4,6 +4,7 @@ pragma solidity ^0.8.26;
 import {TegataBase} from "./TegataBase.sol";
 import {InvoiceRegistry} from "../src/rwa/InvoiceRegistry.sol";
 import {CreditRiskModel} from "../src/rwa/CreditRiskModel.sol";
+import {CollateralVault} from "../src/rwa/CollateralVault.sol";
 
 /// The curve is priced from the DEBTOR's credit, not chosen by the supplier: rating + on-chain payment history.
 contract CreditRiskTest is TegataBase {
@@ -27,8 +28,9 @@ contract CreditRiskTest is TegataBase {
         assertEq(registry.fairPrice(invoiceId, block.timestamp), _fairAt(300, 90 days));
     }
 
-    /// An unrated debtor is priced as the weakest grade (G5: 1% + 16% = 17%) and must lock 20% collateral first.
-    function test_unratedDebtorPricedAsG5AndNeedsCollateral() public {
+    /// An unrated debtor is priced as the weakest grade (G5: 1% + 16% = 17%). Anyone can invoice it; to ACCEPT it
+    /// must first lock 20% of what it will owe.
+    function test_unratedDebtorPricedAsG5AndNeedsCollateralToAccept() public {
         address unrated = makeAddr("unrated");
         assertFalse(risk.isRated(unrated));
         assertEq(risk.gradeOf(unrated), 0);
@@ -36,18 +38,19 @@ contract CreditRiskTest is TegataBase {
         assertEq(risk.rateBps(unrated), 1_700);
 
         vm.prank(supplier);
+        uint256 id = registry.registerInvoice(unrated, FACE, maturity, keccak256("z"), ""); // never blocked
+        assertEq(registry.invoice(id).rateAtIssueBps, 1_700);
+        vm.prank(unrated);
         vm.expectRevert(abi.encodeWithSelector(InvoiceRegistry.CollateralRequired.selector, unrated, 200_000e18, 0));
-        registry.registerInvoice(unrated, FACE, maturity, keccak256("z"), "");
+        registry.acceptInvoice(id);
 
         jpyc.mint(unrated, 200_000e18);
         vm.startPrank(unrated);
         jpyc.approve(address(vault), type(uint256).max);
         vault.deposit(200_000e18);
+        registry.acceptInvoice(id);
         vm.stopPrank();
-        vm.prank(supplier);
-        uint256 id = registry.registerInvoice(unrated, FACE, maturity, keccak256("z"), "");
-        // 17% − 20% coverage × 2% = 16.6%
-        assertEq(registry.invoice(id).rateAtIssueBps, 1_660);
+        assertEq(registry.rateOf(id), 1_660); // 17% − 20% coverage × 2%
 
         // Once the operator rates it, the grade (and price) follow the rating.
         vm.prank(operator);
@@ -56,32 +59,32 @@ contract CreditRiskTest is TegataBase {
         assertEq(registry.rateOf(id), 160); // 1% + 1% − 0.4%
     }
 
-    /// The deploy default: collateral optional (G4–G5 requirement 0). An unrated debtor can be invoiced at once; the
-    /// risk is priced by the G5 rate, and collateral stays voluntary (it lowers the rate and can be withdrawn freely).
-    function test_unratedDebtorInvoicedWithoutCollateralWhenOptional() public {
-        vm.startPrank(operator);
-        vault.setRequiredBps(4, 0);
-        vault.setRequiredBps(5, 0);
-        vm.stopPrank();
+    /// With the unrated requirement switched off, an unrated debtor accepts at once at 17%. Voluntary collateral
+    /// lowers the rate and stays locked until the invoice is paid.
+    function test_unratedDebtorAcceptsWithoutCollateralWhenOptional() public {
+        vm.prank(operator);
+        vault.setRequiredBps(0, 0);
         address unrated = makeAddr("unrated, no collateral");
         assertEq(vault.required(unrated, FACE), 0);
 
         vm.prank(supplier);
         uint256 id = registry.registerInvoice(unrated, FACE, maturity, keccak256("no-collateral"), "NC-1");
-        assertEq(registry.invoice(id).rateAtIssueBps, 1_700); // G5, nothing locked
+        assertEq(registry.invoice(id).rateAtIssueBps, 1_700);
         vm.prank(unrated);
         registry.acceptInvoice(id);
         assertEq(registry.invoice(id).token.balanceOf(supplier), FACE);
 
-        // Voluntary collateral still lowers the rate and can be taken back at any time.
-        jpyc.mint(unrated, 500_000e18);
+        jpyc.mint(unrated, 1_500_000e18);
         vm.startPrank(unrated);
         jpyc.approve(address(vault), type(uint256).max);
+        jpyc.approve(address(registry), type(uint256).max);
         vault.deposit(500_000e18); // 50% coverage -> −1%
         assertEq(registry.rateOf(id), 1_600);
-        vault.withdraw(500_000e18);
+        vm.expectRevert(abi.encodeWithSelector(CollateralVault.BelowRequired.selector, 500_000e18, 0));
+        vault.withdraw(500_000e18); // locked while the invoice is unpaid
+        registry.pay(id, FACE);
+        vault.withdraw(500_000e18); // paid: free
         vm.stopPrank();
-        assertEq(registry.rateOf(id), 1_700);
     }
 
     function test_onlyRegistryRecordsHistory() public {

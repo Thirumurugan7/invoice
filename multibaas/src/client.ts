@@ -50,10 +50,12 @@ export function baseContract(label: string, contract: string) {
 /// ABI registered under a (label, version), so re-registering with the same version silently keeps the old one.
 ///   registry 5.0 = open access (no KYB/KYC, setCompanyName) · risk 4.0 = + gradeFor (unrated = G5)
 ///   vault 3.0 = + collateral interest (APR, reward pool) · market 4.0 / token 4.0 = no holder checks
+///   registry 6.0 / vault 4.0 = security fixes (unique names, per-pair docKey, collateral at acceptance, locked
+///   backing collateral, interest on backing only)
 export const VERSIONS: Record<string, string> = {
-  tegata_invoice_registry: '5.0',
+  tegata_invoice_registry: '6.0',
   tegata_credit_risk: '4.0',
-  tegata_collateral_vault: '3.0',
+  tegata_collateral_vault: '4.0',
   tegata_curve_hook: '2.0',
   tegata_market: '4.0',
   tegata_invoice_token: '4.0',

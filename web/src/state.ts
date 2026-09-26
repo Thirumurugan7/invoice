@@ -19,6 +19,8 @@ export type InvoiceRow = {
   rateAtIssueBps: number;
   debtorGrade: number; // grade that prices the debtor (unrated = G5)
   debtorRated: boolean; // rated by the operator
+  supplierRated: boolean;
+  acceptNeed: bigint; // pending only: collateral the debtor must hold to accept
   debtorCoverageBps: number; // collateral / outstanding
   frozen: boolean;
   status: number;
@@ -43,7 +45,9 @@ export type Book = {
     outstanding: bigint;
     collateral: bigint;
     collateralRequired: bigint;
-    requiredBps: number; // collateral share required at this grade
+    requiredBps: number; // collateral share required to accept (by grade; unrated = index 0)
+    locked: bigint; // collateral backing accepted, unpaid invoices (can't be withdrawn)
+    stake: bigint; // collateral earning interest
     coverageBps: number;
     interest: bigint; // accrued, unclaimed collateral interest
     jpycAllowanceVault: bigint;
@@ -55,7 +59,7 @@ export type Book = {
   bandBps: bigint;
   baseRateBps: number;
   aprBps: number; // collateral interest
-  requiredByGrade: number[]; // mandatory collateral share (bps) by grade; index 1..5 (unrated = G5)
+  requiredByGrade: number[]; // collateral share (bps) required to accept, by grade; index 0 = unrated
   rewardReserve: bigint; // JPYC available to pay collateral interest
 };
 
@@ -94,8 +98,12 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
         r(dep.vault, ABI.vault, 'aprBps'),
         r(dep.vault, ABI.vault, 'rewardReserve'),
       ]);
-      const requiredByGrade = [0, ...(await Promise.all([1, 2, 3, 4, 5].map((g) => r(dep.vault, ABI.vault, 'requiredBps', [BigInt(g)])))).map(Number)];
-      const requiredBps = requiredByGrade[Number(grade)];
+      const requiredByGrade = (await Promise.all([0, 1, 2, 3, 4, 5].map((g) => r(dep.vault, ABI.vault, 'requiredBps', [BigInt(g)])))).map(Number);
+      const [requiredBps, locked, stake] = await Promise.all([
+        r(dep.vault, ABI.vault, 'requiredBpsFor', [s.account]).then(Number),
+        r(dep.vault, ABI.vault, 'lockedOf', [s.account]),
+        r(dep.vault, ABI.vault, 'stakeOf', [s.account]),
+      ]);
       const pids = (await r(dep.market, ABI.market, 'positionsOf', [s.account])) as bigint[];
       const positions = await Promise.all(
         pids.map(async (pid) => {
@@ -119,6 +127,10 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
           r(dep.vault, ABI.vault, 'coverageBps', [inv.debtor]),
           r(dep.risk, ABI.risk, 'isRated', [inv.debtor]),
         ]);
+        const [supplierRated, acceptNeed] = await Promise.all([
+          r(dep.risk, ABI.risk, 'isRated', [inv.supplier]),
+          Number(inv.status) === 1 ? r(dep.vault, ABI.vault, 'required', [inv.debtor, inv.face]) : Promise.resolve(0n),
+        ]);
         let poolPrice: bigint | undefined;
         let deviationBps: bigint | undefined;
         if (poolCreated) {
@@ -140,6 +152,8 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
           rateAtIssueBps: Number(inv.rateAtIssueBps),
           debtorGrade: Number(debtorGrade),
           debtorRated,
+          supplierRated,
+          acceptNeed,
           debtorCoverageBps: Number(debtorCoverage),
           frozen: inv.frozen,
           status: Number(inv.status),
@@ -171,6 +185,8 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
           collateral,
           collateralRequired,
           requiredBps,
+          locked,
+          stake,
           coverageBps: Number(coverageBps),
           interest,
           jpycAllowanceVault: aVault,

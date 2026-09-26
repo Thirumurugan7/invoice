@@ -12,18 +12,17 @@ interface IOutstanding {
 
 /// @title CollateralVault — debtors lock JPYC against what they owe, and earn interest on it
 /// @notice
-///   - Optional by default: any debtor may lock collateral. The operator can make it mandatory per grade
-///     (`setRequiredBps`): a debtor must then cover that share of its outstanding invoices before a new invoice can be
-///     registered against it. Unrated debtors use G5 (CreditRiskModel.gradeFor). The constructor starts G4–G5 at 20%;
-///     script/Deploy.s.sol sets them to COLLATERAL_REQUIRED_BPS (default 0 = optional), so a debtor can never block
-///     a supplier from registering an invoice unless the operator opts in.
+///   - Required at acceptance: before a debtor can accept an invoice it must hold collateral covering
+///     `requiredBps[grade]` of everything it will then owe. Index 0 is for UNRATED debtors (default 20%); rated
+///     grades G1–G5 default to 0% (operator-settable). Registration is never blocked, only acceptance.
+///   - Locked until paid: collateral up to the debtor's accepted, unpaid face (`registry.outstandingOf`) can't be
+///     withdrawn; only the excess can. So collateral that lowered a rate is still there if the debtor defaults.
 ///   - Any collateral lowers the debtor's rate (CreditRiskModel reads `coverageBps`): up to −2% at full coverage.
-///   - Locked collateral earns simple interest at `aprBps` (operator-set). Interest is paid in JPYC from
-///     `rewardReserve`, a pool anyone (normally the operator) funds. Interest accrues whether or not the pool is
-///     funded; a claim pays what the pool can cover and the rest stays claimable.
+///   - Interest only on backing collateral: simple interest at `aprBps` on min(collateral, outstanding), so parking
+///     JPYC without invoices earns nothing. Paid in JPYC from `rewardReserve`, a pool anyone (normally the operator)
+///     funds; a claim pays what the pool can cover and the rest stays claimable.
 ///   - On default the registry seizes collateral up to the unpaid amount and adds it to what holders redeem. Interest
 ///     already accrued stays with the debtor.
-///   - Collateral can be withdrawn only down to what the debtor's current outstanding requires.
 ///   Accounting: the vault's JPYC balance covers `totalCollateral + rewardReserve`; the two never mix.
 contract CollateralVault is AccessControl {
     using SafeERC20 for IERC20;
@@ -36,7 +35,7 @@ contract CollateralVault is AccessControl {
     IERC20 public immutable jpyc;
     CreditRiskModel public immutable risk;
     address public registry;
-    uint32[6] public requiredBps; // by grade; index 0 unused (unrated debtors use CreditRiskModel.gradeFor = G5)
+    uint32[6] public requiredBps; // collateral share required to accept, by grade; index 0 = unrated debtors
     mapping(address => uint256) public collateralOf;
     uint256 public totalCollateral;
 
@@ -47,6 +46,7 @@ contract CollateralVault is AccessControl {
     uint64 public indexUpdatedAt;
     mapping(address => uint256) public indexOf; // debtor's snapshot of interestIndex
     mapping(address => uint256) public accruedInterest; // earned, not yet claimed
+    mapping(address => uint256) public stakeOf; // collateral earning interest: min(collateral, outstanding)
 
     event RegistrySet(address registry);
     event RequiredBpsSet(uint8 indexed grade, uint32 bps);
@@ -71,7 +71,7 @@ contract CollateralVault is AccessControl {
         risk = risk_;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(OPERATOR_ROLE, admin);
-        requiredBps = [uint32(0), 0, 0, 0, 2_000, 2_000]; // G4, G5 (and unrated): 20% of outstanding
+        requiredBps = [uint32(2_000), 0, 0, 0, 0, 0]; // unrated: 20% of what it will owe; rated: optional
         indexUpdatedAt = uint64(block.timestamp);
     }
 
@@ -82,7 +82,7 @@ contract CollateralVault is AccessControl {
     }
 
     function setRequiredBps(uint8 grade, uint32 bps) external onlyRole(OPERATOR_ROLE) {
-        if (grade == 0 || grade > 5 || bps > BPS) revert BadGrade();
+        if (grade > 5 || bps > BPS) revert BadGrade(); // grade 0 = unrated
         requiredBps[grade] = bps;
         emit RequiredBpsSet(grade, bps);
     }
@@ -117,16 +117,18 @@ contract CollateralVault is AccessControl {
         jpyc.safeTransferFrom(msg.sender, address(this), amount);
         collateralOf[msg.sender] += amount;
         totalCollateral += amount;
+        _restake(msg.sender);
         emit CollateralDeposited(msg.sender, amount, collateralOf[msg.sender]);
     }
 
     function withdraw(uint256 amount) external {
         _accrue(msg.sender);
-        uint256 need = required(msg.sender, 0);
+        uint256 locked = lockedOf(msg.sender);
         uint256 remaining = collateralOf[msg.sender] - amount; // reverts on underflow
-        if (remaining < need) revert BelowRequired(need, remaining);
+        if (remaining < locked) revert BelowRequired(locked, remaining);
         collateralOf[msg.sender] = remaining;
         totalCollateral -= amount;
+        _restake(msg.sender);
         jpyc.safeTransfer(msg.sender, amount);
         emit CollateralWithdrawn(msg.sender, amount, remaining);
     }
@@ -153,14 +155,36 @@ contract CollateralVault is AccessControl {
         if (amount == 0) return 0;
         collateralOf[debtor] = c - amount;
         totalCollateral -= amount;
+        _restake(debtor);
         jpyc.safeTransfer(registry, amount);
         emit CollateralSeized(debtor, invoiceId, amount, c - amount);
     }
 
+    /// @notice Registry hook: the debtor's outstanding changed (accept, pay, default). Books interest on the old stake
+    ///         and re-bases it.
+    function sync(address debtor) external {
+        if (msg.sender != registry) revert NotRegistry();
+        _accrue(debtor);
+        _restake(debtor);
+    }
+
     // ---------------------------------------------------------------- views
-    /// @notice Collateral the debtor must hold if its outstanding grew by `extraFace`.
+    /// @notice Collateral that can't be withdrawn: whatever backs the debtor's accepted, unpaid invoices.
+    function lockedOf(address debtor) public view returns (uint256) {
+        if (registry == address(0)) return 0;
+        uint256 c = collateralOf[debtor];
+        uint256 outstanding = IOutstanding(registry).outstandingOf(debtor);
+        return c < outstanding ? c : outstanding;
+    }
+
+    /// @notice Collateral share (bps) this debtor must cover to accept an invoice: by operator grade, 0 = unrated.
+    function requiredBpsFor(address debtor) public view returns (uint256) {
+        return requiredBps[risk.gradeOf(debtor)];
+    }
+
+    /// @notice Collateral the debtor must hold to accept an invoice of `extraFace`.
     function required(address debtor, uint256 extraFace) public view returns (uint256) {
-        uint256 bps = requiredBps[risk.gradeFor(debtor)];
+        uint256 bps = requiredBpsFor(debtor);
         if (bps == 0) return 0;
         uint256 outstanding = IOutstanding(registry).outstandingOf(debtor) + extraFace;
         return (outstanding * bps + BPS - 1) / BPS; // round up
@@ -178,7 +202,7 @@ contract CollateralVault is AccessControl {
 
     /// @notice Interest the debtor has earned and not yet claimed, up to now.
     function interestOf(address debtor) external view returns (uint256) {
-        return accruedInterest[debtor] + collateralOf[debtor] * (_currentIndex() - indexOf[debtor]) / 1e18;
+        return accruedInterest[debtor] + stakeOf[debtor] * (_currentIndex() - indexOf[debtor]) / 1e18;
     }
 
     // ---------------------------------------------------------------- internal
@@ -191,10 +215,15 @@ contract CollateralVault is AccessControl {
         indexUpdatedAt = uint64(block.timestamp);
     }
 
-    /// @dev Book the debtor's interest up to now at their current collateral. Call before collateral changes.
+    /// @dev Book the debtor's interest up to now on its current stake. Call before the stake changes.
     function _accrue(address debtor) internal {
         _updateIndex();
-        accruedInterest[debtor] += collateralOf[debtor] * (interestIndex - indexOf[debtor]) / 1e18;
+        accruedInterest[debtor] += stakeOf[debtor] * (interestIndex - indexOf[debtor]) / 1e18;
         indexOf[debtor] = interestIndex;
+    }
+
+    /// @dev Stake = collateral backing accepted invoices. Call right after collateral or outstanding changes.
+    function _restake(address debtor) internal {
+        stakeOf[debtor] = lockedOf(debtor);
     }
 }
