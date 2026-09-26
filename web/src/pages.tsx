@@ -703,15 +703,87 @@ type AgentStatus = Record<AgentName, boolean>;
 const MAX_ATTACHMENT_CHARS = 30_000;
 const PLAYBOOK_STORAGE_KEY = 'workspace.playbook.v1';
 
-function loadPlaybook(): { provider: AgentName; messages: AssistantMessage[] } {
+type Sessions = Partial<Record<AgentName, string>>; // Claude Code session ids, so follow-ups keep the conversation
+
+function loadPlaybook(): { provider?: AgentName; messages: AssistantMessage[]; sessions: Sessions } {
   try {
     const saved = JSON.parse(localStorage.getItem(PLAYBOOK_STORAGE_KEY) || '{}');
-    const provider = ['GPT', 'Claude', 'Gemini'].includes(saved.provider) ? saved.provider : 'GPT';
+    const provider = ['GPT', 'Claude', 'Gemini'].includes(saved.provider) ? saved.provider : undefined;
     const messages = Array.isArray(saved.messages) ? saved.messages.slice(-100) : [];
-    return { provider, messages };
+    const sessions = saved.sessions && typeof saved.sessions === 'object' ? saved.sessions : {};
+    return { provider, messages, sessions };
   } catch {
-    return { provider: 'GPT', messages: [] };
+    return { messages: [], sessions: {} };
   }
+}
+
+/// Minimal, safe markdown for assistant replies: paragraphs, "-"/"1." lists, **bold** and `code`. Builds React elements
+/// (never injects HTML), so model output can't smuggle markup into the page.
+function inline(text: string) {
+  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter(Boolean).map((part, k) =>
+    part.startsWith('**') && part.endsWith('**') ? <strong key={k}>{part.slice(2, -2)}</strong>
+      : part.startsWith('`') && part.endsWith('`') ? <code key={k}>{part.slice(1, -1)}</code>
+        : part,
+  );
+}
+
+function RichText({ text }: { text: string }) {
+  const blocks: JSX.Element[] = [];
+  let list: { ordered: boolean; items: string[] } | undefined;
+  const flush = () => {
+    if (!list) return;
+    const items = list.items.map((item, k) => <li key={k}>{inline(item)}</li>);
+    blocks.push(list.ordered ? <ol key={blocks.length}>{items}</ol> : <ul key={blocks.length}>{items}</ul>);
+    list = undefined;
+  };
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    const bullet = line.match(/^[-*•]\s+(.*)$/);
+    const numbered = line.match(/^\d+[.)]\s+(.*)$/);
+    if (bullet || numbered) {
+      const ordered = Boolean(numbered);
+      if (list && list.ordered !== ordered) flush();
+      list ??= { ordered, items: [] };
+      list.items.push((bullet ?? numbered)![1]);
+    } else {
+      flush();
+      if (line) blocks.push(<p key={blocks.length}>{inline(line.replace(/^#{1,6}\s+/, ''))}</p>);
+    }
+  }
+  flush();
+  return <>{blocks}</>;
+}
+
+/// Reads the ops desk's server-sent events (Claude Code): session, text, tool, done, error.
+async function readAgentStream(response: Response, on: { text: (delta: string) => void; tool: (label: string) => void; session: (id: string) => void }) {
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let split;
+    while ((split = buffer.indexOf('\n\n')) >= 0) {
+      const frame = buffer.slice(0, split);
+      buffer = buffer.slice(split + 2);
+      const event = frame.match(/^event: (.*)$/m)?.[1];
+      const raw = frame.match(/^data: (.*)$/m)?.[1];
+      if (!event || !raw) continue;
+      const data = JSON.parse(raw);
+      if (event === 'session') on.session(data.sessionId);
+      else if (event === 'text') on.text(data.delta);
+      else if (event === 'tool') on.tool(data.label);
+      else if (event === 'done') {
+        if (data.sessionId) on.session(data.sessionId);
+        return String(data.reply ?? '');
+      } else if (event === 'error') {
+        if (data.sessionId) on.session(data.sessionId);
+        throw new Error(data.error || 'Claude could not respond.');
+      }
+    }
+  }
+  throw new Error('The connection to Claude closed before it finished.');
 }
 
 async function readAssistantAttachment(file: File) {
@@ -780,9 +852,11 @@ function portfolioSnapshot(book: Book) {
   };
 }
 
-function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: WorkflowContext; onClear: () => void }) {
+function AssistantPanel({ book, account, selected, onClear }: { book: Book; account?: string; selected?: WorkflowContext; onClear: () => void }) {
   const initialPlaybook = useRef(loadPlaybook());
-  const [provider, setProvider] = useState<AgentName>(initialPlaybook.current.provider);
+  const [provider, setProvider] = useState<AgentName>(initialPlaybook.current.provider ?? 'Claude');
+  const [sessions, setSessions] = useState<Sessions>(initialPlaybook.current.sessions);
+  const [activity, setActivity] = useState<string>();
   const [draft, setDraft] = useState('');
   const [messages, setMessages] = useState<AssistantMessage[]>(initialPlaybook.current.messages);
   const [status, setStatus] = useState<AgentStatus>({ GPT: false, Claude: false, Gemini: false });
@@ -815,18 +889,22 @@ function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: Wo
   useEffect(() => {
     fetch('/api/agents/status', { cache: 'no-store' })
       .then((response) => response.json())
-      .then(setStatus)
+      .then((next: AgentStatus) => {
+        setStatus(next);
+        // Don't sit on an assistant that isn't installed: fall back to the first connected one.
+        setProvider((current) => (next[current] ? current : (['Claude', 'GPT', 'Gemini'] as AgentName[]).find((name) => next[name]) ?? current));
+      })
       .catch(() => {})
       .finally(() => setStatusReady(true));
   }, []);
 
   useEffect(() => {
     try {
-      localStorage.setItem(PLAYBOOK_STORAGE_KEY, JSON.stringify({ provider, messages: messages.slice(-100) }));
+      localStorage.setItem(PLAYBOOK_STORAGE_KEY, JSON.stringify({ provider, messages: messages.slice(-100), sessions }));
     } catch {
       // The conversation remains available for this session when storage is unavailable.
     }
-  }, [provider, messages]);
+  }, [provider, messages, sessions]);
 
   const submit = async (text: string, workflow?: WorkflowContext, structuredLabel?: string) => {
     const clean = text.trim();
@@ -841,21 +919,46 @@ function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: Wo
     }]);
     setDraft('');
     setLoading(true);
+    setActivity(undefined);
+    const structured = Boolean(workflow || structuredLabel);
     try {
       const response = await fetch('/api/agents/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           provider,
+          sessionId: sessions[provider],
+          account: account && !/^0x0{40}$/i.test(account) ? account : undefined,
           prompt: workflow
             ? `${clean}\n\nWorkflow context:\n${JSON.stringify(workflow, null, 2)}`
             : attachment ? `${clean}\n\nAttached file: ${attachment.name}\n${attachment.text}` : clean,
         }),
       });
-      const result = await response.json();
-      if (!response.ok) throw new Error(result.error || 'The assistant could not respond.');
+      let reply: string;
+      if ((response.headers.get('Content-Type') || '').includes('text/event-stream')) {
+        // Claude Code streams: show text as it arrives (unless we're waiting for a JSON review card).
+        let streamed = false;
+        reply = await readAgentStream(response, {
+          session: (id) => setSessions((current) => ({ ...current, [provider]: id })),
+          tool: (label) => setActivity(label),
+          text: (delta) => {
+            setActivity(undefined);
+            if (structured) return;
+            setMessages((current) => (streamed
+              ? [...current.slice(0, -1), { role: 'assistant', text: current[current.length - 1].text + delta }]
+              : [...current, { role: 'assistant', text: delta }]));
+            streamed = true;
+          },
+        });
+        if (streamed) setMessages((current) => current.slice(0, -1)); // replaced by the final message below
+      } else {
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || 'The assistant could not respond.');
+        reply = String(result.reply);
+      }
+      const result = { reply };
       let review: WorkflowReview | undefined;
-      if (workflow || structuredLabel) {
+      if (structured) {
         try {
           const json = String(result.reply).match(/\{[\s\S]*\}/)?.[0];
           const parsed = json ? JSON.parse(json) : undefined;
@@ -879,6 +982,7 @@ function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: Wo
       setMessages((current) => [...current, { role: 'assistant', text: String(error?.message ?? error) }]);
     } finally {
       setLoading(false);
+      setActivity(undefined);
     }
   };
 
@@ -912,7 +1016,9 @@ function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: Wo
           <h3>AI operations desk</h3>
         </div>
         <div className="assistant-head-actions">
-          {messages.length > 0 && <button className="ghost small" onClick={() => setMessages([])}>Clear history</button>}
+          {messages.length > 0 && (
+            <button className="ghost small" onClick={() => { setMessages([]); setSessions({}); }}>Clear history</button>
+          )}
           <div className="provider-switch" aria-label="AI provider">
             {(['GPT', 'Claude', 'Gemini'] as AgentName[]).map((name) => (
               <button key={name} className={provider === name ? 'active' : ''} onClick={() => setProvider(name)}>
@@ -967,9 +1073,13 @@ function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: Wo
                   </div>
                   <div className="next-action-owner"><span>Owner</span><b>{message.review.owner}</b></div>
                 </div>
-              ) : <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}>{message.text}</div>
+              ) : (
+                <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}>
+                  {message.role === 'assistant' ? <RichText text={message.text} /> : message.text}
+                </div>
+              )
             ))}
-            {loading && <div className="assistant-message assistant loading-message">{provider} is working…</div>}
+            {loading && <div className="assistant-message assistant loading-message">{activity ? `${activity}…` : `${provider} is working…`}</div>}
           </div>
         )}
       </div>
@@ -1009,7 +1119,7 @@ function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: Wo
   );
 }
 
-export function PlaybookPage({ book }: Props) {
+export function PlaybookPage({ book, s }: Props) {
   return (
     <div className="playbook-page">
       <div className="playbook-title">
@@ -1019,12 +1129,12 @@ export function PlaybookPage({ book }: Props) {
         </div>
         <p className="muted">Your assistant conversations and next actions stay here when you change views or reload.</p>
       </div>
-      <AssistantPanel book={book} onClear={() => {}} />
+      <AssistantPanel book={book} account={s.account} onClear={() => {}} />
     </div>
   );
 }
 
-export function BookPage({ book, onViewAll }: Props) {
+export function BookPage({ book, s, onViewAll }: Props) {
   const [mb, setMb] = useState<MbBook>();
   const [mbErr, setMbErr] = useState<string>();
   const [selectedWorkflow, setSelectedWorkflow] = useState<WorkflowContext>();
@@ -1057,7 +1167,7 @@ export function BookPage({ book, onViewAll }: Props) {
             {onViewAll && <button onClick={onViewAll}>View invoices</button>}
           </div>
         </div>
-        <AssistantPanel book={book} selected={selectedWorkflow} onClear={() => setSelectedWorkflow(undefined)} />
+        <AssistantPanel book={book} account={s.account} selected={selectedWorkflow} onClear={() => setSelectedWorkflow(undefined)} />
       </div>
       {mb && (
         <div className="grid">
