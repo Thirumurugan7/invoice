@@ -701,6 +701,18 @@ type AssistantMessage = { role: 'user' | 'assistant'; text: string; review?: Wor
 type AgentName = 'GPT' | 'Claude' | 'Gemini';
 type AgentStatus = Record<AgentName, boolean>;
 const MAX_ATTACHMENT_CHARS = 30_000;
+const PLAYBOOK_STORAGE_KEY = 'workspace.playbook.v1';
+
+function loadPlaybook(): { provider: AgentName; messages: AssistantMessage[] } {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PLAYBOOK_STORAGE_KEY) || '{}');
+    const provider = ['GPT', 'Claude', 'Gemini'].includes(saved.provider) ? saved.provider : 'GPT';
+    const messages = Array.isArray(saved.messages) ? saved.messages.slice(-100) : [];
+    return { provider, messages };
+  } catch {
+    return { provider: 'GPT', messages: [] };
+  }
+}
 
 async function readAssistantAttachment(file: File) {
   if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
@@ -769,9 +781,10 @@ function portfolioSnapshot(book: Book) {
 }
 
 function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: WorkflowContext; onClear: () => void }) {
-  const [provider, setProvider] = useState<AgentName>('GPT');
+  const initialPlaybook = useRef(loadPlaybook());
+  const [provider, setProvider] = useState<AgentName>(initialPlaybook.current.provider);
   const [draft, setDraft] = useState('');
-  const [messages, setMessages] = useState<AssistantMessage[]>([]);
+  const [messages, setMessages] = useState<AssistantMessage[]>(initialPlaybook.current.messages);
   const [status, setStatus] = useState<AgentStatus>({ GPT: false, Claude: false, Gemini: false });
   const [statusReady, setStatusReady] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -806,6 +819,14 @@ function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: Wo
       .catch(() => {})
       .finally(() => setStatusReady(true));
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PLAYBOOK_STORAGE_KEY, JSON.stringify({ provider, messages: messages.slice(-100) }));
+    } catch {
+      // The conversation remains available for this session when storage is unavailable.
+    }
+  }, [provider, messages]);
 
   const submit = async (text: string, workflow?: WorkflowContext, structuredLabel?: string) => {
     const clean = text.trim();
@@ -890,12 +911,15 @@ function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: Wo
           <span className="eyebrow">Workflow assistant</span>
           <h3>AI operations desk</h3>
         </div>
-        <div className="provider-switch" aria-label="AI provider">
-          {(['GPT', 'Claude', 'Gemini'] as AgentName[]).map((name) => (
-            <button key={name} className={provider === name ? 'active' : ''} onClick={() => setProvider(name)}>
-              <i className={status[name] ? 'connected' : ''} />{name}
-            </button>
-          ))}
+        <div className="assistant-head-actions">
+          {messages.length > 0 && <button className="ghost small" onClick={() => setMessages([])}>Clear history</button>}
+          <div className="provider-switch" aria-label="AI provider">
+            {(['GPT', 'Claude', 'Gemini'] as AgentName[]).map((name) => (
+              <button key={name} className={provider === name ? 'active' : ''} onClick={() => setProvider(name)}>
+                <i className={status[name] ? 'connected' : ''} />{name}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -982,6 +1006,21 @@ function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: Wo
         {attachment && <p className="attachment-ready">PDF or document ready · {attachment.text.length.toLocaleString()} characters extracted</p>}
       </form>
     </section>
+  );
+}
+
+export function PlaybookPage({ book }: Props) {
+  return (
+    <div className="playbook-page">
+      <div className="playbook-title">
+        <div>
+          <span className="eyebrow">Persistent workspace</span>
+          <h2>Playbook</h2>
+        </div>
+        <p className="muted">Your assistant conversations and next actions stay here when you change views or reload.</p>
+      </div>
+      <AssistantPanel book={book} onClear={() => {}} />
+    </div>
   );
 }
 
