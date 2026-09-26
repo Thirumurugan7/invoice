@@ -26,6 +26,7 @@ import { useBook, useTx, type Book, type TxStatus } from './state';
 
 const TABS = ['Book', 'Invoices', 'Marketplace', 'Playbook', 'Activity', 'Permissions', 'Operator'] as const;
 type Tab = (typeof TABS)[number];
+const CONSUMER_TABS = ['Book', 'Invoices', 'Playbook'] as const;
 const TAB_LABEL: Record<Tab, string> = {
   Book: 'Dashboard',
   Invoices: 'Invoices',
@@ -211,12 +212,15 @@ export default function App() {
   };
   const selectWorkspace = (value: string) => {
     setWorkspace(value);
-    if (!local) return;
     const index = value === 'Treasury Operations' ? 0 : value === 'Capital Account' ? 3 : value === 'Consumer Finance' ? 4 : 1;
+    // Always land on the role's own page (the previous page may not exist in the new role's navigation).
+    setTab(value === 'Consumer Finance' ? 'Book' : index === 0 ? 'Operator' : index === 3 ? 'Marketplace' : 'Invoices');
+    if (!local) return; // on Sepolia the connected wallet stays; only the local demo switches accounts
     setS(devSession(DEV_ACCOUNTS[index].key, dep.chainId));
     setDevIndex(index);
-    setTab(value === 'Consumer Finance' ? 'Book' : index === 0 ? 'Operator' : index === 3 ? 'Marketplace' : 'Invoices');
   };
+  // Consumer Finance only has Dashboard, Invoices and Playbook; never render a page outside the current role's rail.
+  const view: Tab = isConsumer && !CONSUMER_TABS.includes(tab as (typeof CONSUMER_TABS)[number]) ? 'Book' : tab;
 
   return (
     <div className="shell">
@@ -224,8 +228,8 @@ export default function App() {
         <div className="rail-mark">
           <img src="/mark.png?v=1" alt="Liquidity Desk" />
         </div>
-        {(isConsumer ? (['Book', 'Invoices', 'Playbook'] as const) : TABS).map((t) => (
-          <button key={t} className={t === tab ? 'rail-btn active' : 'rail-btn'} title={isConsumer && t === 'Book' ? 'Dashboard' : TAB_LABEL[t]} onClick={() => setTab(t)}>
+        {(isConsumer ? CONSUMER_TABS : TABS).map((t) => (
+          <button key={t} className={t === view ? 'rail-btn active' : 'rail-btn'} title={isConsumer && t === 'Book' ? 'Dashboard' : TAB_LABEL[t]} onClick={() => setTab(t)}>
             {TAB_ICON[t]}
           </button>
         ))}
@@ -342,21 +346,21 @@ export default function App() {
         {err && <p className="error">{err}</p>}
         {book && (
           <main>
-            {tab === 'Invoices' && (
+            {view === 'Invoices' && (
               book.me.isOperator
                 ? <OperatorPage dep={dep} s={s} book={book} send={send} />
                 : book.invoices.some((invoice) => invoice.debtor.toLowerCase() === s.account.toLowerCase())
                   ? <DebtorPage dep={dep} s={s} book={book} send={send} />
                   : <SupplierPage dep={dep} s={s} book={book} send={send} isConsumer={isConsumer} />
             )}
-            {tab === 'Marketplace' && <InvestorPage dep={dep} s={s} book={book} send={send} />}
-            {tab === 'Permissions' && <PermissionsPage dep={dep} s={s} book={book} send={send} />}
-            {tab === 'Activity' && <ActivityPage dep={dep} s={s} book={book} send={send} />}
-            {tab === 'Playbook' && <PlaybookPage dep={dep} s={s} book={book} send={send} />}
-            {tab === 'Book' && (workspace === 'Consumer Finance'
+            {view === 'Marketplace' && <InvestorPage dep={dep} s={s} book={book} send={send} />}
+            {view === 'Permissions' && <PermissionsPage dep={dep} s={s} book={book} send={send} />}
+            {view === 'Activity' && <ActivityPage dep={dep} s={s} book={book} send={send} />}
+            {view === 'Playbook' && <PlaybookPage dep={dep} s={s} book={book} send={send} />}
+            {view === 'Book' && (workspace === 'Consumer Finance'
               ? <ConsumerDashboard session={s} />
               : <BookPage dep={dep} s={s} book={book} send={send} onViewAll={() => setTab('Marketplace')} />)}
-            {tab === 'Operator' && <OperatorPage dep={dep} s={s} book={book} send={send} />}
+            {view === 'Operator' && <OperatorPage dep={dep} s={s} book={book} send={send} />}
           </main>
         )}
       </div>

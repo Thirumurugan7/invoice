@@ -75,6 +75,15 @@ A debtor the operator hasn't rated is priced as **G5** (17%). Any supplier can i
 | `webhook-server.ts` | Verifies `X-MultiBaas-Signature` = HMAC-SHA256(secret, body ‖ timestamp). On `InvoiceRegistered` it **auto-links the new invoice token** so holder Transfer events are indexed immediately, and notifies the debtor, holders and so on | Webhooks, contract linking |
 | `book.ts` + web **Book** tab | Receivables book: outstanding by debtor, maturity ladder, payments, **credit events (ratings, on-time/late/default)**, curve trades | **Event Queries** (aggregations such as `add` grouped by id) |
 
+## AI operations desk (Claude Code)
+The dashboard's AI operations desk runs the operator's own logged-in **Claude Code** (`claude` CLI; no API key needed) behind the Vite dev server (`web/vite.config.ts`):
+- **Live on-chain tools.** A read-only MCP server (`web/agent/tegata-mcp.mjs`) gives Claude four tools that read the contracts the app is using: `get_overview`, `list_invoices`, `get_invoice` (including the on-chain `contractURI` record), and `get_company` (rating, rate, payment history, collateral locked or free, interest, invoices). There is no signer, so it can't send transactions. Role-aware prepared actions still go to the user's wallet for approval.
+- **Streaming and memory.** Replies stream to the browser as server-sent events, with a live "Reading invoices from the chain…" indicator. Each conversation is a Claude Code session resumed with `--resume`, so follow-ups keep context. **Clear history** starts a new one.
+- **Boxed in.** Built-in tools are off (`--tools ""`: no file reads, no shell). Only the Tegata MCP server is loaded (`--strict-mcp-config`, so none of your other MCP servers or claude.ai connectors). Only its tools are allowed (`--allowedTools mcp__tegata`, `--permission-mode dontAsk`). It runs in an empty working directory with no project settings or CLAUDE.md; GPT (Codex CLI) and Gemini CLI also run there, never in the repo (which holds `.env`).
+- **This machine only.** The dev server is also exposed through ngrok for World ID Selfie Check, so `/api/agents/*` rejects any request with a non-local `Host` or forwarding headers: nobody on the tunnel can use your Claude subscription.
+
+Open the app at `http://localhost:5174`: the MultiBaas CORS allow-list has `localhost`, not `127.0.0.1`.
+
 ## Run it
 ```bash
 git clone --recursive https://github.com/Thirumurugan7/invoice && cd invoice   # submodules: uniswap-hooks (v4-core/periphery/OZ), forge-std
