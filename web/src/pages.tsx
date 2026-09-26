@@ -179,7 +179,8 @@ function SellCard({ inv, dep, book, send, s, isConsumer }: { inv: InvoiceRow; de
         </p>
       )}
       <p className="muted">Buyer grade G{inv.debtorGrade}{inv.debtorRated ? '' : ' (unrated)'} · pricing rate {pct(inv.rateBps)} (at upload {pct(inv.rateAtIssueBps)})</p>
-      {inv.status === 2 && inv.poolCreated && (worldCap.verified || !worldCap.gated) && (
+      {inv.status === 2 && inv.poolCreated && !inv.tradable && <p className="muted">Trading is closed for this invoice (paused for review, or within 1 day of maturity).</p>}
+      {inv.status === 2 && inv.poolCreated && inv.tradable && (worldCap.verified || !worldCap.gated) && (
         <>
           <F label="Sell face amount" value={amt} set={setAmt} />
           <p className="muted">
@@ -274,11 +275,22 @@ export function DebtorPage({ dep, s, book, send }: Props) {
               {m.collateral < inv.acceptNeed && <span className="form-warning">Reserve {yen(inv.acceptNeed - m.collateral)} more before approval.</span>}
             </div>
           )}
-          {inv.status === 2 && (
-            <button onClick={() => send('Pay invoice in JPYC', dep.registry, ABI.registry, 'pay', [BigInt(inv.id), inv.face - inv.funded])}>
-              Settle {yen(inv.face - inv.funded)}
-            </button>
-          )}
+          {inv.status === 2 && (() => {
+            const due = inv.face - inv.funded;
+            const early = book.chainTime < inv.maturity;
+            const short_ = m.jpyc < due ? `Balance ${yen(m.jpyc)} is below the ${yen(due)} due.` : m.jpycAllowanceRegistry < due ? 'Approve the settlement account first.' : '';
+            return (
+              <>
+                <p className="muted small-text">Approved. Payment is due {jst(inv.maturity)}; investors can trade this invoice until then.</p>
+                <div className="row">
+                  <button className={early ? 'ghost' : ''} disabled={Boolean(short_)} onClick={() => send(`${early ? 'Repay early' : 'Pay'} invoice #${inv.id} in JPYC`, dep.registry, ABI.registry, 'pay', [BigInt(inv.id), due])}>
+                    {early ? `Repay early ${yen(due)}` : `Pay ${yen(due)} now`}
+                  </button>
+                  {short_ && <span className="form-warning">{short_}</span>}
+                </div>
+              </>
+            );
+          })()}
         </section>
       ))}
     </div>
@@ -289,6 +301,7 @@ export function InvestorPage({ dep, s, book, send }: Props) {
   const [bid, setBid] = useState('300000');
   const [buyAmt, setBuyAmt] = useState('50000');
   const [offset, setOffset] = useState('0');
+  const validOffset = /^\d+$/.test(offset) && Number(offset) % 10 === 0;
   return (
     <div>
       <p className="muted">
@@ -342,6 +355,7 @@ export function InvestorPage({ dep, s, book, send }: Props) {
                   {inv.poolCreated && inv.tradable && (
                     <button
                       className="small"
+                      disabled={!validOffset}
                       onClick={() => send(`Post ${bid} JPYC bids`, dep.market, ABI.market, 'postBids', [BigInt(inv.id), u(bid), Number(offset), 150, deadline(book)])}
                     >
                       Place bid
@@ -377,6 +391,7 @@ export function InvestorPage({ dep, s, book, send }: Props) {
       <div className="row">
         <F label="Bid size (JPYC)" value={bid} set={setBid} />
         <F label="Price offset below indicative (ticks, ×10)" value={offset} set={setOffset} />
+        {!validOffset && <p className="form-warning">Offset must be 0 or a positive multiple of 10 ticks.</p>}
         <F label="Investment size (JPYC)" value={buyAmt} set={setBuyAmt} />
       </div>
     </div>
@@ -485,13 +500,13 @@ export function ActivityPage({ book }: Props) {
     <section className="panel activity-panel">
       <div className="panel-title">
         <h3>Transaction activity</h3>
-        <span className="muted small-text">submitted · awaiting confirmation · funded · under review</span>
+        <span className="muted small-text">awaiting confirmation · approved · trading · settled · under review</span>
       </div>
       {rows.length === 0 ? (
         <p className="empty-state">No invoice activity yet.</p>
       ) : (
         rows.map((inv) => {
-          const status = inv.frozen ? 'Under review' : inv.status === 1 ? 'Awaiting confirmation' : inv.status === 2 ? 'Funded' : inv.status === 4 ? 'Settled' : STATUS[inv.status];
+          const status = inv.frozen ? 'Under review' : inv.status === 1 ? 'Awaiting confirmation' : inv.status === 2 ? (inv.poolCreated ? 'Trading' : 'Approved') : inv.status === 4 ? 'Settled' : STATUS[inv.status];
           const tone = inv.frozen || inv.status === 1 ? 'butter' : inv.status === 2 ? 'mint' : inv.status === 4 ? 'ink' : 'negative';
           return (
             <div className="activity-row" key={inv.id}>

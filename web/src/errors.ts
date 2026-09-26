@@ -21,6 +21,7 @@ const EXPLAIN: Record<string, (a: readonly unknown[]) => string> = {
   InsufficientReserve: (a) => `The reward pool only holds ${yen(a[0] as bigint)}.`,
   BadApr: (a) => `APR ${a[0]} bps is above the 20% (2000 bps) cap.`,
   NotOwner: () => 'Not your bid position.',
+  BadRange: () => 'Bid range must be a positive depth and a non-negative offset, both multiples of 10 ticks.',
   DuplicateInvoice: (a) => `This invoice document is already financed as invoice #${a[0]} (二重譲渡 blocked).`,
   InvalidTerms: () => 'Invalid terms (face above ¥0 and at most ¥1 trillion, tenor ≥ 1 day, a debtor address that is not your own).',
   NotDebtor: () => 'Only the invoice debtor can do this.',
