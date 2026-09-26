@@ -1,12 +1,20 @@
-// Optional: read the receivables book from MultiBaas Event Queries instead of RPC.
-// Enable with VITE_MB_BASE_URL + VITE_MB_API_KEY (add this app's origin to the MultiBaas deployment's CORS list).
-import * as MultiBaas from '@curvegrid/multibaas-sdk';
+// Read the receivables book from MultiBaas Event Queries through this app's own server (/api/mb/query: the Vite dev
+// server locally, a Vercel function when hosted). The MultiBaas API key stays on the server and never ships to the browser.
+import type * as MultiBaas from '@curvegrid/multibaas-sdk';
 
-const base = import.meta.env.VITE_MB_BASE_URL as string | undefined;
-const key = import.meta.env.VITE_MB_API_KEY as string | undefined;
-export const multibaasEnabled = Boolean(base && key);
+export const multibaasEnabled = true;
 
-const api = () => new MultiBaas.EventQueriesApi(new MultiBaas.Configuration({ basePath: new URL('/api/v0', base!).toString(), accessToken: key! }));
+async function runQuery(query: MultiBaas.EventQuery, offset: number, limit: number): Promise<Record<string, any>[]> {
+  const response = await fetch('/api/mb/query', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, offset, limit }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || body.message || `MultiBaas query failed (${response.status})`);
+  return (body.result?.rows ?? []) as Record<string, any>[];
+}
+
 const byAlias = (alias: string): MultiBaas.EventQueryFilter => ({ fieldType: 'contract_address_alias', operator: 'equal', value: alias });
 
 export type MbBook = { registered: Record<string, any>[]; paid: Record<string, any>[]; trades: Record<string, any>[]; credit: Record<string, any>[] };
@@ -16,7 +24,7 @@ export async function fetchBookFromMultiBaas(): Promise<MbBook> {
   const q = async (query: MultiBaas.EventQuery, max = Infinity) => {
     const rows: Record<string, any>[] = [];
     for (let offset = 0; rows.length < max; offset += 50) {
-      const page = ((await api().executeArbitraryEventQuery(query, offset, 50)).data.result?.rows ?? []) as Record<string, any>[];
+      const page = await runQuery(query, offset, 50);
       rows.push(...page);
       if (page.length < 50) break;
     }

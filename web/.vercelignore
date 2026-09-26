@@ -1,0 +1,7 @@
+# Never upload secrets or local state; builds use the committed ABIs and public/deployment.json.
+.env
+.env.*
+!.env.example
+.data
+dist
+node_modules

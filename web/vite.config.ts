@@ -7,8 +7,8 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { signRequest } from '@worldcoin/idkit-server';
-import { hashSignal } from '@worldcoin/idkit-core/hashing';
+import { multibaasQuery, type MultiBaasEnv } from './server/multibaas';
+import { worldRpContext, worldStatus, worldVerify, type VerificationStore, type WorldEnv, type WorldVerification } from './server/world';
 
 const exec = promisify(execFile);
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -223,92 +223,71 @@ function localAgentBridge() {
   };
 }
 
-type WorldVerification = { address: string; score: number; verifiedAt: number; nullifier: string };
-const WORLD_ACTION = 'consumer-invoice-advance';
 const verificationPath = join(projectRoot, 'web', '.data', 'world-verifications.json');
 
-async function readVerifications(): Promise<Record<string, WorldVerification>> {
-  try {
-    return JSON.parse(await readFile(verificationPath, 'utf8'));
-  } catch {
-    return {};
-  }
-}
+/// Dev-server store for World ID verifications: a local JSON file (git-ignored).
+const fileStore: VerificationStore = {
+  async get(address) {
+    try {
+      return JSON.parse(await readFile(verificationPath, 'utf8'))[address.toLowerCase()];
+    } catch {
+      return undefined;
+    }
+  },
+  async set(record) {
+    let records: Record<string, WorldVerification> = {};
+    try { records = JSON.parse(await readFile(verificationPath, 'utf8')); } catch { /* first record */ }
+    records[record.address.toLowerCase()] = record;
+    await mkdir(dirname(verificationPath), { recursive: true });
+    await writeFile(verificationPath, `${JSON.stringify(records, null, 2)}\n`, 'utf8');
+  },
+};
 
-async function saveVerification(record: WorldVerification) {
-  const records = await readVerifications();
-  records[record.address.toLowerCase()] = record;
-  await mkdir(dirname(verificationPath), { recursive: true });
-  await writeFile(verificationPath, `${JSON.stringify(records, null, 2)}\n`, 'utf8');
-}
-
-function worldIdentityBridge(env: Record<string, string>) {
-  const rpId = env.WORLD_RP_ID || process.env.WORLD_RP_ID || '';
-  const signingKey = env.WORLD_RP_SIGNING_KEY || process.env.WORLD_RP_SIGNING_KEY || '';
-  const configured = Boolean(env.VITE_WORLD_APP_ID && rpId && signingKey);
-  const json = (res: any, status: number, value: unknown) => {
-    res.statusCode = status;
-    res.setHeader('Content-Type', 'application/json');
-    res.setHeader('Cache-Control', 'no-store');
-    res.end(JSON.stringify(value));
-  };
-  const body = (req: any) => new Promise<any>((resolve, reject) => {
-    let raw = '';
-    req.on('data', (chunk: Buffer) => {
-      raw += String(chunk);
-      if (raw.length > 128_000) reject(new Error('Request is too large.'));
-    });
-    req.on('end', () => {
-      try { resolve(JSON.parse(raw || '{}')); } catch { reject(new Error('Body is not valid JSON.')); }
-    });
+const sendJson = (res: any, status: number, value: unknown) => {
+  res.statusCode = status;
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 'no-store');
+  res.end(JSON.stringify(value));
+};
+const readBody = (req: any) => new Promise<any>((resolve, reject) => {
+  let raw = '';
+  req.on('data', (chunk: Buffer) => {
+    raw += String(chunk);
+    if (raw.length > 128_000) reject(new Error('Request is too large.'));
   });
+  req.on('end', () => {
+    try { resolve(JSON.parse(raw || '{}')); } catch { reject(new Error('Body is not valid JSON.')); }
+  });
+});
+
+/// World ID + MultiBaas proxy for local development; the same logic runs as Vercel functions in web/api.
+function serverBridge(env: Record<string, string>) {
+  const world: WorldEnv = {
+    appId: env.VITE_WORLD_APP_ID || process.env.VITE_WORLD_APP_ID,
+    rpId: env.WORLD_RP_ID || process.env.WORLD_RP_ID,
+    signingKey: env.WORLD_RP_SIGNING_KEY || process.env.WORLD_RP_SIGNING_KEY,
+  };
+  const mb: MultiBaasEnv = {
+    baseUrl: env.MB_BASE_URL || env.VITE_MB_BASE_URL || process.env.MB_BASE_URL,
+    apiKey: env.MB_API_KEY || env.VITE_MB_API_KEY || process.env.MB_API_KEY,
+  };
+  const handle = (fn: (req: any) => Promise<{ status: number; body: unknown }>) => async (req: any, res: any) => {
+    try {
+      const reply = await fn(req);
+      sendJson(res, reply.status, reply.body);
+    } catch (error: any) {
+      sendJson(res, 502, { error: String(error?.message || error) });
+    }
+  };
+  const post = (fn: (input: any) => Promise<{ status: number; body: unknown }> | { status: number; body: unknown }) =>
+    handle(async (req) => (req.method !== 'POST' ? { status: 405, body: { error: 'Method not allowed.' } } : fn(await readBody(req))));
   return {
-    name: 'world-identity-bridge',
+    name: 'server-bridge',
     configureServer(server: any) {
-      server.middlewares.use('/api/world/status', async (req: any, res: any) => {
-        const address = new URL(req.url || '', 'http://localhost').searchParams.get('address') || '';
-        if (!/^0x[0-9a-fA-F]{40}$/.test(address)) return json(res, 400, { error: 'A valid wallet address is required.' });
-        const records = await readVerifications();
-        json(res, 200, { configured, verification: records[address.toLowerCase()] || null });
-      });
-      server.middlewares.use('/api/world/rp-context', async (req: any, res: any) => {
-        try {
-          if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed.' });
-          if (!configured) return json(res, 503, { error: 'World ID is not configured.' });
-          const input = await body(req);
-          if (input.action !== WORLD_ACTION) return json(res, 400, { error: 'Unsupported verification action.' });
-          const signed = signRequest({ signingKeyHex: signingKey, action: WORLD_ACTION });
-          json(res, 200, { rp_context: { rp_id: rpId, nonce: signed.nonce, created_at: signed.createdAt, expires_at: signed.expiresAt, signature: signed.sig } });
-        } catch (error: any) {
-          json(res, 400, { error: String(error?.message || error) });
-        }
-      });
-      server.middlewares.use('/api/world/verify', async (req: any, res: any) => {
-        try {
-          if (req.method !== 'POST') return json(res, 405, { error: 'Method not allowed.' });
-          if (!configured) return json(res, 503, { error: 'World ID is not configured.' });
-          const input = await body(req);
-          if (!/^0x[0-9a-fA-F]{40}$/.test(input.address || '')) return json(res, 400, { error: 'A valid wallet address is required.' });
-          const result = input.result;
-          // Must match the `environment` prop on IDKitRequestWidget in consumer.tsx.
-          if (result?.action !== WORLD_ACTION || result?.environment !== 'production') return json(res, 400, { error: 'Unexpected World ID action or environment.' });
-          if (!result?.integrity_bundle) return json(res, 400, { error: 'Selfie Check integrity bundle is missing.' });
-          const selfie = result?.responses?.find((item: any) => item.identifier === 'selfie');
-          const score = Number(selfie?.sybil_score);
-          if (!selfie?.nullifier || !Number.isFinite(score) || score < 0 || score > 100) return json(res, 400, { error: 'A valid Selfie Check Sybil score was not returned.' });
-          if (selfie.signal_hash !== hashSignal(input.address)) return json(res, 400, { error: 'This Selfie Check is not bound to the connected wallet.' });
-          const verified = await fetch(`https://developer.world.org/api/v4/verify/${rpId}`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(result),
-          });
-          const verification = await verified.json().catch(() => ({}));
-          if (!verified.ok || !verification.success) return json(res, 400, { error: verification.detail || verification.code || 'World rejected this proof.' });
-          const record = { address: input.address, score, verifiedAt: Math.floor(Date.now() / 1000), nullifier: selfie.nullifier };
-          await saveVerification(record);
-          json(res, 200, { verification: record });
-        } catch (error: any) {
-          json(res, 502, { error: String(error?.message || error) });
-        }
-      });
+      server.middlewares.use('/api/world/status', handle(async (req) => worldStatus(world, fileStore, new URL(req.url || '', 'http://localhost').searchParams.get('address'))));
+      server.middlewares.use('/api/world/rp-context', post((input) => worldRpContext(world, input)));
+      server.middlewares.use('/api/world/verify', post((input) => worldVerify(world, fileStore, input)));
+      server.middlewares.use('/api/mb/query', post((input) => multibaasQuery(mb, input)));
     },
   };
 }
@@ -316,7 +295,7 @@ function worldIdentityBridge(env: Record<string, string>) {
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, fileURLToPath(new URL('.', import.meta.url)), '');
   return {
-    plugins: [react(), localAgentBridge(), worldIdentityBridge(env)],
+    plugins: [react(), localAgentBridge(), serverBridge(env)],
     // allowedHosts: true so the ngrok tunnel used for World ID Selfie Check (a free-tier subdomain that changes on
     // every restart) can reach the dev server; Vite otherwise rejects requests whose Host header it doesn't recognize.
     server: { host: '127.0.0.1', port: 5174, allowedHosts: true },

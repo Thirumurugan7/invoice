@@ -996,6 +996,7 @@ function AssistantPanel({ dep, s, book, send, selected, onClear }: Props & { sel
   const [provider, setProvider] = useState<AgentName>(initialPlaybook.current.provider ?? 'Claude');
   const [sessions, setSessions] = useState<Sessions>(initialPlaybook.current.sessions);
   const [activity, setActivity] = useState<string>();
+  const [hosted, setHosted] = useState(false); // the public site has no assistant: it runs on the operator's machine
   const [draft, setDraft] = useState('');
   const [messages, setMessages] = useState<AssistantMessage[]>(initialPlaybook.current.messages);
   const [status, setStatus] = useState<AgentStatus>({ GPT: false, Claude: false, Gemini: false });
@@ -1034,7 +1035,8 @@ function AssistantPanel({ dep, s, book, send, selected, onClear }: Props & { sel
   useEffect(() => {
     fetch('/api/agents/status', { cache: 'no-store' })
       .then((response) => response.json())
-      .then((next: AgentStatus) => {
+      .then((next: AgentStatus & { hosted?: boolean }) => {
+        if (next.hosted) setHosted(true);
         setStatus(next);
         // Don't sit on an assistant that isn't installed: fall back to the first connected one.
         setProvider((current) => (next[current] ? current : (['Claude', 'GPT', 'Gemini'] as AgentName[]).find((name) => next[name]) ?? current));
@@ -1189,6 +1191,19 @@ function AssistantPanel({ dep, s, book, send, selected, onClear }: Props & { sel
 
       {draggingOver && <div className="workflow-drop-overlay">Drop to review the next best action</div>}
 
+      {hosted ? (
+        <div className="assistant-body">
+          <div className="assistant-welcome">
+            <div className="assistant-symbol" aria-hidden="true"><span /><span /><span /></div>
+            <h2>Runs in the operator's local app</h2>
+            <p className="muted">
+              The AI operations desk drives the operator's own Claude Code with read-only tools over the live contracts, so it runs on the operator's machine,
+              not on this public site. Everything else here works against the same live Sepolia deployment.
+            </p>
+          </div>
+        </div>
+      ) : (
+      <>
       <div className="assistant-body">
         {messages.length === 0 ? (
           <div className="assistant-welcome">
@@ -1268,6 +1283,8 @@ function AssistantPanel({ dep, s, book, send, selected, onClear }: Props & { sel
         {attachmentError && <p className="attachment-error" role="alert">{attachmentError}</p>}
         {attachment && <p className="attachment-ready">PDF or document ready · {attachment.text.length.toLocaleString()} characters extracted</p>}
       </form>
+      </>
+      )}
     </section>
   );
 }
