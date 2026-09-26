@@ -221,7 +221,9 @@ export default function App() {
   return (
     <div className="shell">
       <aside className="rail">
-        <div className="rail-mark">LD</div>
+        <div className="rail-mark">
+          <img src="/mark.png?v=1" alt="Liquidity Desk" />
+        </div>
         {(isConsumer ? (['Book', 'Invoices', 'Playbook'] as const) : TABS).map((t) => (
           <button key={t} className={t === tab ? 'rail-btn active' : 'rail-btn'} title={isConsumer && t === 'Book' ? 'Dashboard' : TAB_LABEL[t]} onClick={() => setTab(t)}>
             {TAB_ICON[t]}
