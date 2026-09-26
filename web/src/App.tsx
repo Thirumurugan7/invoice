@@ -20,17 +20,16 @@ import {
   type WalletInfo,
 } from './chain';
 import { jst, short, yen } from './errors';
+import { ConsumerDashboard } from './consumer';
 import { ActivityPage, BookPage, DebtorPage, InvestorPage, OperatorPage, PermissionsPage, PlaybookPage, SupplierPage } from './pages';
 import { useBook, useTx, type Book, type TxStatus } from './state';
 
-const TABS = ['Book', 'Invoices', 'Marketplace', 'Sell', 'Invest', 'Permissions', 'Activity', 'Playbook', 'Operator'] as const;
+const TABS = ['Book', 'Invoices', 'Marketplace', 'Playbook', 'Activity', 'Permissions', 'Operator'] as const;
 type Tab = (typeof TABS)[number];
 const TAB_LABEL: Record<Tab, string> = {
   Book: 'Dashboard',
   Invoices: 'Invoices',
   Marketplace: 'Marketplace',
-  Sell: 'Sell Invoice',
-  Invest: 'Invest',
   Permissions: 'Wallet & Permissions',
   Activity: 'Transaction Activity',
   Playbook: 'Playbook',
@@ -51,16 +50,6 @@ const TAB_ICON: Record<Tab, JSX.Element> = {
   Marketplace: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <path d="M4 9h16" /><path d="M6 9l1-4h10l1 4" /><path d="M7 9v10" /><path d="M17 9v10" /><path d="M4 19h16" />
-    </svg>
-  ),
-  Sell: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 20V6" /><path d="M6 12l6-6 6 6" /><path d="M5 20h14" />
-    </svg>
-  ),
-  Invest: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M4 18l5-5 4 4 7-7" /><path d="M14 10h6v6" />
     </svg>
   ),
   Permissions: (
@@ -106,6 +95,7 @@ export default function App() {
   const [dep, setDep] = useState<Deployment>();
   const [loadErr, setLoadErr] = useState<string>();
   const [s, setS] = useState<Session>();
+  const [devIndex, setDevIndex] = useState(1);
   const [tab, setTab] = useState<Tab>('Book');
   const [tick, setTick] = useState(0);
   const [wallets, setWallets] = useState<WalletInfo[]>([]);
@@ -188,6 +178,7 @@ export default function App() {
   };
 
   const askConnect = useCallback(() => (wallets.length === 1 ? connect(wallets[0]) : setPicker(true)), [wallets, dep]);
+  const isConsumer = workspace === 'Consumer Finance';
 
   const { book, err } = useBook(dep, s, tick);
   const { status, send } = useTx(s, dep?.chainId, refresh, askConnect);
@@ -200,8 +191,8 @@ export default function App() {
     const me = s.account.toLowerCase();
     if (book.me.isOperator) setTab('Operator');
     else if (book.invoices.some((i) => i.debtor.toLowerCase() === me)) setTab('Invoices');
-    else if (book.me.name || book.invoices.some((i) => i.supplier.toLowerCase() === me)) setTab('Sell');
-    else setTab('Invest');
+    else if (book.me.name || book.invoices.some((i) => i.supplier.toLowerCase() === me)) setTab('Invoices');
+    else setTab('Marketplace');
   }, [book, s]);
 
   if (loadErr) return <div className="shell"><p className="error">{loadErr}</p></div>;
@@ -214,24 +205,25 @@ export default function App() {
     else if (/activity|transaction|settlement/.test(value)) setTab('Activity');
     else if (/playbook|chat|assistant|action/.test(value)) setTab('Playbook');
     else if (/admin|operator|company|credit/.test(value)) setTab('Operator');
-    else if (/sell|upload|early/.test(value)) setTab('Sell');
+    else if (/sell|upload|early|invoice/.test(value)) setTab('Invoices');
     else if (/invest|bid|market|buyer/.test(value)) setTab('Marketplace');
     else setTab('Invoices');
   };
   const selectWorkspace = (value: string) => {
     setWorkspace(value);
     if (!local) return;
-    const index = value === 'Treasury Operations' ? 0 : value === 'Capital Account' ? 3 : 1;
+    const index = value === 'Treasury Operations' ? 0 : value === 'Capital Account' ? 3 : value === 'Consumer Finance' ? 4 : 1;
     setS(devSession(DEV_ACCOUNTS[index].key, dep.chainId));
-    setTab(index === 0 ? 'Operator' : index === 3 ? 'Invest' : 'Sell');
+    setDevIndex(index);
+    setTab(value === 'Consumer Finance' ? 'Book' : index === 0 ? 'Operator' : index === 3 ? 'Marketplace' : 'Invoices');
   };
 
   return (
     <div className="shell">
       <aside className="rail">
         <div className="rail-mark">LD</div>
-        {TABS.map((t) => (
-          <button key={t} className={t === tab ? 'rail-btn active' : 'rail-btn'} title={TAB_LABEL[t]} onClick={() => setTab(t)}>
+        {(isConsumer ? (['Book', 'Invoices', 'Playbook'] as const) : TABS).map((t) => (
+          <button key={t} className={t === tab ? 'rail-btn active' : 'rail-btn'} title={isConsumer && t === 'Book' ? 'Dashboard' : TAB_LABEL[t]} onClick={() => setTab(t)}>
             {TAB_ICON[t]}
           </button>
         ))}
@@ -243,30 +235,40 @@ export default function App() {
             <b>Liquidity Desk</b>
             <span className="muted">{dep.chainId === 11155111 ? 'Sepolia' : dep.chainId === 31337 ? 'Local chain' : `Chain ${dep.chainId}`}</span>
           </div>
-          <label className="global-search">
-            <span>Search</span>
-            <input
-              value={search}
-              placeholder="Invoice, buyer, settlement"
-              onChange={(event) => setSearch(event.target.value)}
-              onKeyDown={(event) => { if (event.key === 'Enter') runSearch(); }}
-            />
-          </label>
+          {!isConsumer && (
+            <label className="global-search">
+              <span>Search</span>
+              <input
+                value={search}
+                placeholder="Invoice, buyer, settlement"
+                onChange={(event) => setSearch(event.target.value)}
+                onKeyDown={(event) => { if (event.key === 'Enter') runSearch(); }}
+              />
+            </label>
+          )}
           <select className="company-switcher" aria-label="Company account" value={workspace} onChange={(event) => selectWorkspace(event.target.value)}>
             <option>Treasury Operations</option>
             <option>Seller Account</option>
             <option>Capital Account</option>
+            <option>Consumer Finance</option>
           </select>
-          <button className="upload-cta" onClick={() => setTab('Sell')}>Upload Invoice</button>
+          <button className="upload-cta" onClick={() => setTab('Invoices')}>Upload Invoice</button>
           <div className="topbar-spacer" />
           <div className="acct">
             {local ? (
               <select
-                defaultValue={1}
+                value={devIndex}
                 onChange={(e) => {
                   const i = Number(e.target.value);
                   setS(devSession(DEV_ACCOUNTS[i].key, dep.chainId));
-                  setTab(DEV_ACCOUNTS[i].role === 'Operator' ? 'Operator' : DEV_ACCOUNTS[i].role === 'Investor' ? 'Invest' : DEV_ACCOUNTS[i].role === 'Supplier' ? 'Sell' : 'Invoices');
+                  setDevIndex(i);
+                  if (i === 4) {
+                    setWorkspace('Consumer Finance');
+                    setTab('Book');
+                  } else {
+                    if (isConsumer) setWorkspace('Treasury Operations');
+                    setTab(DEV_ACCOUNTS[i].role === 'Operator' ? 'Operator' : DEV_ACCOUNTS[i].role === 'Investor' ? 'Marketplace' : 'Invoices');
+                  }
                 }}
               >
                 {DEV_ACCOUNTS.map((a, i) => (<option key={a.label} value={i}>{a.label} (local)</option>))}
@@ -300,8 +302,17 @@ export default function App() {
         </div>
 
         <div className="page-intro">
-          <h1>Invoice liquidity workspace <span className="muted">{dep.chainId === 11155111 ? ' · Sepolia' : dep.chainId === 31337 ? ' · Local demo' : ''}</span></h1>
-          <p className="muted">Get paid early, review investor bids, and monitor delegated settlement status from one operator-grade finance console.</p>
+          {isConsumer ? (
+            <>
+              <h1>Consumer Finance <span className="muted">{dep.chainId === 11155111 ? ' · Sepolia' : dep.chainId === 31337 ? ' · Local demo' : ''}</span></h1>
+              <p className="muted">Verify once with World ID and see how much of a personal invoice you can access today — no company or KYB required.</p>
+            </>
+          ) : (
+            <>
+              <h1>Invoice liquidity workspace <span className="muted">{dep.chainId === 11155111 ? ' · Sepolia' : dep.chainId === 31337 ? ' · Local demo' : ''}</span></h1>
+              <p className="muted">Get paid early, review investor bids, and monitor delegated settlement status from one operator-grade finance console.</p>
+            </>
+          )}
         </div>
 
         {connectErr && <p className="error">{connectErr}</p>}
@@ -319,20 +330,30 @@ export default function App() {
         )}
         {s.kind === 'wallet' && book && <WalletPanel dep={dep} s={s} book={book} send={send} />}
         {s.kind === 'readonly' && (
-          <div className="banner pending">Read-only view of the invoice marketplace. Connect a wallet to upload invoices, review bids, approve payments, invest, or redeem settled positions.</div>
+          <div className="banner pending">
+            {isConsumer
+              ? 'Read-only view. Connect a wallet to verify with World ID, upload a personal invoice, and check your advance.'
+              : 'Read-only view of the invoice marketplace. Connect a wallet to upload invoices, review bids, approve payments, invest, or redeem settled positions.'}
+          </div>
         )}
         <Banner status={status} chainId={dep.chainId} />
         {err && <p className="error">{err}</p>}
         {book && (
           <main>
-            {tab === 'Sell' && <SupplierPage dep={dep} s={s} book={book} send={send} />}
-            {tab === 'Invoices' && <DebtorPage dep={dep} s={s} book={book} send={send} />}
+            {tab === 'Invoices' && (
+              book.me.isOperator
+                ? <OperatorPage dep={dep} s={s} book={book} send={send} />
+                : book.invoices.some((invoice) => invoice.debtor.toLowerCase() === s.account.toLowerCase())
+                  ? <DebtorPage dep={dep} s={s} book={book} send={send} />
+                  : <SupplierPage dep={dep} s={s} book={book} send={send} isConsumer={isConsumer} />
+            )}
             {tab === 'Marketplace' && <InvestorPage dep={dep} s={s} book={book} send={send} />}
-            {tab === 'Invest' && <InvestorPage dep={dep} s={s} book={book} send={send} />}
             {tab === 'Permissions' && <PermissionsPage dep={dep} s={s} book={book} send={send} />}
             {tab === 'Activity' && <ActivityPage dep={dep} s={s} book={book} send={send} />}
             {tab === 'Playbook' && <PlaybookPage dep={dep} s={s} book={book} send={send} />}
-            {tab === 'Book' && <BookPage dep={dep} s={s} book={book} send={send} onViewAll={() => setTab('Marketplace')} />}
+            {tab === 'Book' && (workspace === 'Consumer Finance'
+              ? <ConsumerDashboard session={s} />
+              : <BookPage dep={dep} s={s} book={book} send={send} onViewAll={() => setTab('Marketplace')} />)}
             {tab === 'Operator' && <OperatorPage dep={dep} s={s} book={book} send={send} />}
           </main>
         )}

@@ -6,7 +6,7 @@ import { fetchBookFromMultiBaas, multibaasEnabled, type MbBook } from './multiba
 import { STATUS, type Book, type InvoiceRow } from './state';
 
 type Send = (label: string, address: Address, abi: readonly unknown[], fn: string, args: unknown[]) => Promise<void>;
-type Props = { dep: Deployment; s: Session; book: Book; send: Send; onViewAll?: () => void };
+type Props = { dep: Deployment; s: Session; book: Book; send: Send; onViewAll?: () => void; isConsumer?: boolean };
 const MAX = 2n ** 255n;
 const u = (v: string) => parseUnits(v || '0', 18);
 const daysLeft = (inv: InvoiceRow, now: number) => Math.max(0, (inv.maturity - now) / 86400);
@@ -42,7 +42,7 @@ function CompanyName({ dep, book, send }: Props) {
   );
 }
 
-export function SupplierPage({ dep, s, book, send }: Props) {
+export function SupplierPage({ dep, s, book, send, isConsumer }: Props) {
   const [debtor, setDebtor] = useState('');
   const [face, setFace] = useState('500000');
   const [days, setDays] = useState('60');
@@ -126,15 +126,41 @@ export function SupplierPage({ dep, s, book, send }: Props) {
         </div>
       </section>
       {mine.map((inv) => (
-        <SellCard key={inv.id} inv={inv} dep={dep} book={book} send={send} s={s} />
+        <SellCard key={inv.id} inv={inv} dep={dep} book={book} send={send} s={s} isConsumer={isConsumer} />
       ))}
     </div>
   );
 }
 
-function SellCard({ inv, dep, book, send, s }: { inv: InvoiceRow; dep: Deployment; book: Book; send: Send; s: Session }) {
+/// Consumer Finance sells into the same investor market as any supplier — same `market.sell`, same investor bids
+/// and approval — but capped to what their World ID Selfie Check score unlocks, not the full face value. A regular
+/// seller account is unaffected: full face value, no World ID involved.
+function useWorldCap({ gated, s, myTokens }: { gated: boolean; s: Session; myTokens: bigint }) {
+  const [verification, setVerification] = useState<{ score: number } | null>();
+  const [configured, setConfigured] = useState(true);
+  useEffect(() => {
+    if (!gated) return;
+    let live = true;
+    fetch(`/api/world/status?address=${s.account}`, { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((result) => {
+        if (!live) return;
+        setConfigured(Boolean(result.configured));
+        setVerification(result.verification ?? null);
+      })
+      .catch(() => live && setConfigured(false));
+    return () => { live = false; };
+  }, [gated, s.account]);
+  if (!gated || !configured) return { gated: false, verified: true, scorePercent: 100, cap: myTokens };
+  const scorePercent = verification ? Math.max(0, Math.min(100, verification.score <= 10 ? verification.score * 10 : verification.score)) : 0;
+  return { gated: true, verified: Boolean(verification), scorePercent, cap: (myTokens * BigInt(scorePercent)) / 100n };
+}
+
+function SellCard({ inv, dep, book, send, s, isConsumer }: { inv: InvoiceRow; dep: Deployment; book: Book; send: Send; s: Session; isConsumer?: boolean }) {
   const [amt, setAmt] = useState('100000');
   const fairValue = (u(amt) * inv.fair) / 10n ** 18n;
+  const worldCap = useWorldCap({ gated: Boolean(isConsumer), s, myTokens: inv.myTokens });
+  const overCap = worldCap.gated && u(amt) > worldCap.cap;
   return (
     <section className="card">
       <h3>
@@ -145,16 +171,24 @@ function SellCard({ inv, dep, book, send, s }: { inv: InvoiceRow; dep: Deploymen
       </p>
       <InvoiceRecord inv={inv} s={s} />
       <p>Available to sell {yen(inv.myTokens)} face value</p>
+      {worldCap.gated && inv.status === 2 && inv.poolCreated && inv.myTokens > 0n && (
+        <p className="muted small-text">
+          {worldCap.verified
+            ? `Your World ID Selfie Check score unlocks ${worldCap.scorePercent}% of this invoice now (${yen(worldCap.cap)} of ${yen(inv.myTokens)}); the rest releases when ${inv.debtorName || 'the buyer'} pays.`
+            : 'Verify with World ID on the Consumer Finance dashboard to unlock early access to this invoice.'}
+        </p>
+      )}
       <p className="muted">Buyer grade G{inv.debtorGrade}{inv.debtorRated ? '' : ' (unrated)'} · pricing rate {pct(inv.rateBps)} (at upload {pct(inv.rateAtIssueBps)})</p>
-      {inv.status === 2 && inv.poolCreated && (
+      {inv.status === 2 && inv.poolCreated && (worldCap.verified || !worldCap.gated) && (
         <>
           <F label="Sell face amount" value={amt} set={setAmt} />
           <p className="muted">
             Indicative liquidity: <b>{yen(fairValue)}</b> (price {price(inv.fair)}) · minimum proceeds set to 98%
           </p>
+          {overCap && <p className="form-warning">That's above the {yen(worldCap.cap)} your Selfie Check score unlocks right now.</p>}
           <div className="row">
             <button className="ghost" onClick={() => send('Approve invoice token', inv.token, ABI.token, 'approve', [dep.market, MAX])}>Approve</button>
-            <button onClick={() => send(`Sell invoice #${inv.id} for early cash`, dep.market, ABI.market, 'sell', [BigInt(inv.id), u(amt), (fairValue * 98n) / 100n, deadline(book)])}>
+            <button disabled={overCap} onClick={() => send(`Sell invoice #${inv.id} for early cash`, dep.market, ABI.market, 'sell', [BigInt(inv.id), u(amt), (fairValue * 98n) / 100n, deadline(book)])}>
               Get paid early
             </button>
           </div>
@@ -506,6 +540,22 @@ const workflowPrompt = (item: WorkflowContext) => [
   'Keep every value concise and practical for a finance operator. Do not include markdown or additional keys.',
 ].join('\n');
 
+function invoiceWorkflowContext(invoice: InvoiceRow, book: Book, stage: string, status: string): WorkflowContext {
+  return {
+    key: `invoice-${invoice.id}`,
+    invoiceId: String(invoice.id),
+    reference: invoice.ref || 'No reference',
+    stage,
+    status,
+    supplier: invoice.supplierName || short(invoice.supplier),
+    buyer: invoice.debtorName || short(invoice.debtor),
+    buyerGrade: `Grade ${invoice.debtorGrade}`,
+    faceValue: yen(invoice.face),
+    funded: yen(invoice.funded),
+    dueDate: jst(invoice.maturity),
+  };
+}
+
 function MaturityBoard({ book, selected, onSelect }: { book: Book; selected?: WorkflowContext; onSelect: (item: WorkflowContext) => void }) {
   const [showAll, setShowAll] = useState(false);
   const [filter, setFilter] = useState<'open' | 'pending' | 'funded' | 'review'>('open');
@@ -550,19 +600,7 @@ function MaturityBoard({ book, selected, onSelect }: { book: Book; selected?: Wo
       status: isOverdue ? 'Overdue' : `${Math.max(0, Math.ceil((invoice.maturity - book.chainTime) / 86400))}d to due`,
     };
   });
-  const contextFor = (lane: typeof lanes[number]): WorkflowContext => ({
-    key: lane.key,
-    invoiceId: String(lane.invoice.id),
-    reference: lane.invoice.ref || 'No reference',
-    stage: lane.label,
-    status: lane.status,
-    supplier: lane.invoice.supplierName || short(lane.invoice.supplier),
-    buyer: lane.invoice.debtorName || short(lane.invoice.debtor),
-    buyerGrade: `Grade ${lane.invoice.debtorGrade}`,
-    faceValue: yen(lane.invoice.face),
-    funded: yen(lane.invoice.funded),
-    dueDate: jst(lane.invoice.maturity),
-  });
+  const contextFor = (lane: typeof lanes[number]) => invoiceWorkflowContext(lane.invoice, book, lane.label, lane.status);
 
   return (
     <section className="panel schedule-panel">
@@ -645,7 +683,7 @@ function MaturityBoard({ book, selected, onSelect }: { book: Book; selected?: Wo
   );
 }
 
-function UpcomingSettlements({ book }: { book: Book }) {
+function UpcomingSettlements({ book, onSelect }: { book: Book; onSelect: (item: WorkflowContext) => void }) {
   const rows = book.invoices
     .filter((i) => i.status === 2)
     .sort((a, b) => a.maturity - b.maturity)
@@ -659,14 +697,18 @@ function UpcomingSettlements({ book }: { book: Book }) {
         rows.map((inv) => {
           const d = daysLeft(inv, book.chainTime);
           return (
-            <div className="list-row" key={inv.id}>
-              <div className="who">
+            <button className="action-card settlement-action" key={inv.id} onClick={() => onSelect(invoiceWorkflowContext(inv, book, 'Settlement readiness', `${d.toFixed(0)} days to maturity`))}>
+              <div className="action-card-copy">
+                <span className="eyebrow">Settlement review</span>
                 <b>{inv.debtorName || short(inv.debtor)}</b>
                 <span className="muted">#{inv.id} {inv.ref} · due {jst(inv.maturity)}</span>
               </div>
-              <span className="amt">{yen(inv.face - inv.funded)}</span>
-              <span className={`pill-days${d <= 3 ? ' soon' : ''}`}>{d < 1 ? '<1d' : `${d.toFixed(0)}d`}</span>
-            </div>
+              <div className="action-card-meta">
+                <span className="amt">{yen(inv.face - inv.funded)}</span>
+                <span className={`pill-days${d <= 3 ? ' soon' : ''}`}>{d < 1 ? '<1d' : `${d.toFixed(0)}d`}</span>
+                <span className="ai-review-link">Review with AI <span aria-hidden="true">→</span></span>
+              </div>
+            </button>
           );
         })
       )}
@@ -674,116 +716,73 @@ function UpcomingSettlements({ book }: { book: Book }) {
   );
 }
 
-function NeedsAction({ book }: { book: Book }) {
-  const rows = book.invoices.filter((i) => i.status === 1 || i.frozen).slice(0, 6);
+function DashboardActions({ book, s, onSelect }: { book: Book; s: Session; onSelect: (item: WorkflowContext) => void }) {
+  const role = workspaceRole(book, s);
+  const me = s.account.toLowerCase();
+  const rows = role === 'Capital'
+    ? book.invoices
+      .filter((invoice) => invoice.status === 2 && invoice.poolCreated && invoice.tradable)
+      .sort((a, b) => a.debtorGrade - b.debtorGrade || a.maturity - b.maturity)
+      .slice(0, 6)
+      .map((invoice) => ({ invoice, label: 'Review investment', detail: `${price(invoice.fair)} · G${invoice.debtorGrade} · ${Math.ceil(daysLeft(invoice, book.chainTime))}d` }))
+    : role === 'Seller'
+      ? book.invoices
+        .filter((invoice) => invoice.supplier.toLowerCase() === me && (invoice.status === 1 || invoice.status === 2))
+        .slice(0, 6)
+        .map((invoice) => ({
+          invoice,
+          label: invoice.status === 1 ? 'Follow up with buyer' : invoice.poolCreated ? 'Review funding' : 'Open investor bidding',
+          detail: invoice.status === 1 ? 'Awaiting acceptance' : `${yen(invoice.face - invoice.funded)} available`,
+        }))
+      : book.invoices
+        .filter((invoice) => invoice.status === 1 || invoice.frozen || (invoice.status === 2 && book.chainTime > invoice.maturity))
+        .slice(0, 6)
+        .map((invoice) => ({
+          invoice,
+          label: invoice.frozen ? 'Resolve review hold' : invoice.status === 1 ? 'Review pending invoice' : 'Review overdue exposure',
+          detail: invoice.frozen ? 'Trading paused' : invoice.status === 1 ? 'Buyer confirmation pending' : 'Past maturity',
+        }));
   return (
     <section className="panel">
-      <div className="panel-title"><h3>Needs your action</h3></div>
+      <div className="panel-title"><h3>{role === 'Capital' ? 'What to bid on' : 'Needs your action'}</h3><span className="muted small-text">{role} queue</span></div>
       {rows.length === 0 ? (
-        <p className="empty-state">Nothing needs a hand — every invoice is either settling or on the curve.</p>
+        <p className="empty-state">No actionable items right now.</p>
       ) : (
-        rows.map((inv) => (
-          <div className="list-row" key={inv.id}>
-            <div className="who">
-              <b>{inv.supplierName || short(inv.supplier)} → {inv.debtorName || short(inv.debtor)}</b>
-              <span className="muted">#{inv.id} {inv.ref} · {yen(inv.face)}</span>
+        rows.map(({ invoice, label, detail }) => (
+          <button className={`action-card priority-action ${role.toLowerCase()}`} key={invoice.id} onClick={() => onSelect(invoiceWorkflowContext(invoice, book, label, detail))}>
+            <div className="action-card-copy">
+              <span className="eyebrow">{role} priority</span>
+              <b>{label}</b>
+              <span className="muted">#{invoice.id} {invoice.ref} · {invoice.debtorName || short(invoice.debtor)}</span>
             </div>
-            <span className="badge butter">{inv.frozen ? 'Frozen' : 'Awaiting acceptance'}</span>
-          </div>
+            <div className="action-card-meta">
+              <span className="action-detail">{detail}</span>
+              <span className="ai-review-link">Ask AI what’s next <span aria-hidden="true">→</span></span>
+            </div>
+          </button>
         ))
       )}
     </section>
   );
 }
 
-type WorkflowReview = { nextAction: string; urgency: string; risk: string; reason: string; owner: string };
+type WorkspaceRole = 'Seller' | 'Operations' | 'Capital';
+type WorkflowReview = { nextAction: string; urgency: string; risk: string; reason: string; owner: string; actionId?: string };
 type AssistantMessage = { role: 'user' | 'assistant'; text: string; review?: WorkflowReview };
 type AgentName = 'GPT' | 'Claude' | 'Gemini';
 type AgentStatus = Record<AgentName, boolean>;
 const MAX_ATTACHMENT_CHARS = 30_000;
 const PLAYBOOK_STORAGE_KEY = 'workspace.playbook.v1';
 
-type Sessions = Partial<Record<AgentName, string>>; // Claude Code session ids, so follow-ups keep the conversation
-
-function loadPlaybook(): { provider?: AgentName; messages: AssistantMessage[]; sessions: Sessions } {
+function loadPlaybook(): { provider: AgentName; messages: AssistantMessage[] } {
   try {
     const saved = JSON.parse(localStorage.getItem(PLAYBOOK_STORAGE_KEY) || '{}');
-    const provider = ['GPT', 'Claude', 'Gemini'].includes(saved.provider) ? saved.provider : undefined;
+    const provider = ['GPT', 'Claude', 'Gemini'].includes(saved.provider) ? saved.provider : 'GPT';
     const messages = Array.isArray(saved.messages) ? saved.messages.slice(-100) : [];
-    const sessions = saved.sessions && typeof saved.sessions === 'object' ? saved.sessions : {};
-    return { provider, messages, sessions };
+    return { provider, messages };
   } catch {
-    return { messages: [], sessions: {} };
+    return { provider: 'GPT', messages: [] };
   }
-}
-
-/// Minimal, safe markdown for assistant replies: paragraphs, "-"/"1." lists, **bold** and `code`. Builds React elements
-/// (never injects HTML), so model output can't smuggle markup into the page.
-function inline(text: string) {
-  return text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g).filter(Boolean).map((part, k) =>
-    part.startsWith('**') && part.endsWith('**') ? <strong key={k}>{part.slice(2, -2)}</strong>
-      : part.startsWith('`') && part.endsWith('`') ? <code key={k}>{part.slice(1, -1)}</code>
-        : part,
-  );
-}
-
-function RichText({ text }: { text: string }) {
-  const blocks: JSX.Element[] = [];
-  let list: { ordered: boolean; items: string[] } | undefined;
-  const flush = () => {
-    if (!list) return;
-    const items = list.items.map((item, k) => <li key={k}>{inline(item)}</li>);
-    blocks.push(list.ordered ? <ol key={blocks.length}>{items}</ol> : <ul key={blocks.length}>{items}</ul>);
-    list = undefined;
-  };
-  for (const raw of text.split('\n')) {
-    const line = raw.trim();
-    const bullet = line.match(/^[-*•]\s+(.*)$/);
-    const numbered = line.match(/^\d+[.)]\s+(.*)$/);
-    if (bullet || numbered) {
-      const ordered = Boolean(numbered);
-      if (list && list.ordered !== ordered) flush();
-      list ??= { ordered, items: [] };
-      list.items.push((bullet ?? numbered)![1]);
-    } else {
-      flush();
-      if (line) blocks.push(<p key={blocks.length}>{inline(line.replace(/^#{1,6}\s+/, ''))}</p>);
-    }
-  }
-  flush();
-  return <>{blocks}</>;
-}
-
-/// Reads the ops desk's server-sent events (Claude Code): session, text, tool, done, error.
-async function readAgentStream(response: Response, on: { text: (delta: string) => void; tool: (label: string) => void; session: (id: string) => void }) {
-  const reader = response.body!.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let split;
-    while ((split = buffer.indexOf('\n\n')) >= 0) {
-      const frame = buffer.slice(0, split);
-      buffer = buffer.slice(split + 2);
-      const event = frame.match(/^event: (.*)$/m)?.[1];
-      const raw = frame.match(/^data: (.*)$/m)?.[1];
-      if (!event || !raw) continue;
-      const data = JSON.parse(raw);
-      if (event === 'session') on.session(data.sessionId);
-      else if (event === 'text') on.text(data.delta);
-      else if (event === 'tool') on.tool(data.label);
-      else if (event === 'done') {
-        if (data.sessionId) on.session(data.sessionId);
-        return String(data.reply ?? '');
-      } else if (event === 'error') {
-        if (data.sessionId) on.session(data.sessionId);
-        throw new Error(data.error || 'Claude could not respond.');
-      }
-    }
-  }
-  throw new Error('The connection to Claude closed before it finished.');
 }
 
 async function readAssistantAttachment(file: File) {
@@ -809,9 +808,77 @@ async function readAssistantAttachment(file: File) {
   return (await file.text()).slice(0, MAX_ATTACHMENT_CHARS);
 }
 
-const reviewSchema = [
+type PreparedAction = {
+  id: string;
+  role: WorkspaceRole;
+  title: string;
+  detail: string;
+  button: string;
+  address: Address;
+  abi: readonly unknown[];
+  fn: string;
+  args: unknown[];
+};
+
+function workspaceRole(book: Book, s: Session): WorkspaceRole {
+  if (book.me.isOperator) return 'Operations';
+  const mine = book.invoices.some((invoice) => invoice.supplier.toLowerCase() === s.account.toLowerCase());
+  return book.me.name || mine ? 'Seller' : 'Capital';
+}
+
+function preparedAction(dep: Deployment, s: Session, book: Book): PreparedAction | undefined {
+  const role = workspaceRole(book, s);
+  if (role === 'Operations') {
+    const overdue = book.invoices.find((invoice) => invoice.status === 2 && book.chainTime > invoice.maturity + 3 * 86400);
+    if (overdue) return {
+      id: `operations:default:${overdue.id}`, role, title: `Mark invoice #${overdue.id} as defaulted`,
+      detail: `${overdue.ref} is beyond maturity and the three-day grace period.`, button: 'Confirm default in wallet',
+      address: dep.registry, abi: ABI.registry, fn: 'markDefault', args: [BigInt(overdue.id)],
+    };
+    const review = book.invoices.find((invoice) => (invoice.status === 1 || invoice.status === 2) && !invoice.frozen);
+    if (review) return {
+      id: `operations:freeze:${review.id}`, role, title: `Place invoice #${review.id} under review`,
+      detail: `${review.ref} will stop trading until Operations unfreezes it.`, button: 'Confirm review hold in wallet',
+      address: dep.registry, abi: ABI.registry, fn: 'setFrozen', args: [BigInt(review.id), true],
+    };
+    return undefined;
+  }
+  if (role === 'Seller') {
+    const mine = book.invoices.filter((invoice) => invoice.supplier.toLowerCase() === s.account.toLowerCase());
+    const ready = mine.find((invoice) => invoice.status === 2 && !invoice.poolCreated);
+    if (ready) return {
+      id: `seller:pool:${ready.id}`, role, title: `Open funding for invoice #${ready.id}`,
+      detail: `${ready.ref} is accepted and ready for investor bids.`, button: 'Confirm pool creation in wallet',
+      address: dep.market, abi: ABI.market, fn: 'createPool', args: [BigInt(ready.id)],
+    };
+    const inventory = mine.find((invoice) => invoice.status === 2 && invoice.poolCreated && invoice.myTokens > 0n);
+    if (inventory) return {
+      id: `seller:approve:${inventory.id}`, role, title: `Approve invoice #${inventory.id} for sale`,
+      detail: `Authorize the marketplace to transfer this invoice inventory when you submit a sale.`, button: 'Confirm token approval in wallet',
+      address: inventory.token, abi: ABI.token, fn: 'approve', args: [dep.market, MAX],
+    };
+    return undefined;
+  }
+  const amount = 50_000n * 10n ** 18n;
+  if (book.me.jpycAllowanceMarket < amount) return {
+    id: 'capital:approve-market', role, title: 'Approve JPYC for marketplace investing',
+    detail: 'Authorize the marketplace before placing bids or purchasing invoice positions.', button: 'Confirm JPYC approval in wallet',
+    address: dep.jpyc, abi: ABI.jpyc, fn: 'approve', args: [dep.market, MAX],
+  };
+  const target = book.invoices.find((invoice) => invoice.poolCreated && invoice.tradable && invoice.status === 2);
+  if (!target || book.me.jpyc < amount) return undefined;
+  return {
+    id: `capital:buy:${target.id}`, role, title: `Invest ¥50,000 in invoice #${target.id}`,
+    detail: `${target.ref} is tradable; execution includes 2% price protection and a ten-minute deadline.`, button: 'Confirm investment in wallet',
+    address: dep.market, abi: ABI.market, fn: 'buy',
+    args: [BigInt(target.id), amount, (amount * 10n ** 18n * 100n) / (target.fair * 102n), deadline(book)],
+  };
+}
+
+const reviewSchema = (action?: PreparedAction) => [
   'Return only valid JSON with this exact shape:',
-  '{"nextAction":"one specific action starting with a verb","urgency":"Now|Today|This week","risk":"the single most important risk or blocker","reason":"one short evidence-based reason","owner":"the team or role that should act"}',
+  '{"nextAction":"one specific action starting with a verb","urgency":"Now|Today|This week","risk":"the single most important risk or blocker","reason":"one short evidence-based reason","owner":"the team or role that should act","actionId":"approved action id or none"}',
+  action ? `The only executable action you may propose is ${action.id}: ${action.title}. Use that exact actionId only when it supports your recommendation; otherwise use "none".` : 'No executable action is available. Use "none" for actionId.',
   'Do not claim that an action has been executed. Keep every value concise and use only the supplied data.',
 ].join('\n');
 
@@ -852,11 +919,9 @@ function portfolioSnapshot(book: Book) {
   };
 }
 
-function AssistantPanel({ book, account, selected, onClear }: { book: Book; account?: string; selected?: WorkflowContext; onClear: () => void }) {
+function AssistantPanel({ dep, s, book, send, selected, onClear }: Props & { selected?: WorkflowContext; onClear: () => void }) {
   const initialPlaybook = useRef(loadPlaybook());
-  const [provider, setProvider] = useState<AgentName>(initialPlaybook.current.provider ?? 'Claude');
-  const [sessions, setSessions] = useState<Sessions>(initialPlaybook.current.sessions);
-  const [activity, setActivity] = useState<string>();
+  const [provider, setProvider] = useState<AgentName>(initialPlaybook.current.provider);
   const [draft, setDraft] = useState('');
   const [messages, setMessages] = useState<AssistantMessage[]>(initialPlaybook.current.messages);
   const [status, setStatus] = useState<AgentStatus>({ GPT: false, Claude: false, Gemini: false });
@@ -867,44 +932,46 @@ function AssistantPanel({ book, account, selected, onClear }: { book: Book; acco
   const [attachmentError, setAttachmentError] = useState<string>();
   const panelRef = useRef<HTMLElement>(null);
   const snapshot = portfolioSnapshot(book);
+  const role = workspaceRole(book, s);
+  const action = preparedAction(dep, s, book);
   const shortcuts = [
     {
+      label: `Prepare ${role} action`,
+      prompt: `Act as the ${role} workspace assistant. Review the live portfolio and prepare the safest useful next action for human approval.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema(action)}`,
+    },
+    {
       label: 'Portfolio review',
-      prompt: `Review this invoice portfolio. Prioritize the one issue that requires attention first.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema}`,
+      prompt: `Review this invoice portfolio. Prioritize the one issue that requires attention first.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema(action)}`,
     },
     {
       label: 'Funding recommendation',
-      prompt: `Review the open invoices and identify the single best action to improve funding. Consider maturity, funded amount, buyer grade, pricing band, tradability, and pool availability.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema}`,
+      prompt: `Review the open invoices and identify the single best action to improve funding. Consider maturity, funded amount, buyer grade, pricing band, tradability, and pool availability.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema(action)}`,
     },
     {
       label: 'Settlement monitor',
-      prompt: `Review settlement readiness across the invoices. Prioritize overdue or near-maturity exposure and recommend one action.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema}`,
+      prompt: `Review settlement readiness across the invoices. Prioritize overdue or near-maturity exposure and recommend one action.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema(action)}`,
     },
     {
       label: 'Permission check',
-      prompt: `Review the account eligibility, collateral coverage, frozen invoices, and tradability flags. Recommend one compliance or permission action.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema}`,
+      prompt: `Review the account eligibility, collateral coverage, frozen invoices, and tradability flags. Recommend one compliance or permission action.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema(action)}`,
     },
   ];
 
   useEffect(() => {
     fetch('/api/agents/status', { cache: 'no-store' })
       .then((response) => response.json())
-      .then((next: AgentStatus) => {
-        setStatus(next);
-        // Don't sit on an assistant that isn't installed: fall back to the first connected one.
-        setProvider((current) => (next[current] ? current : (['Claude', 'GPT', 'Gemini'] as AgentName[]).find((name) => next[name]) ?? current));
-      })
+      .then(setStatus)
       .catch(() => {})
       .finally(() => setStatusReady(true));
   }, []);
 
   useEffect(() => {
     try {
-      localStorage.setItem(PLAYBOOK_STORAGE_KEY, JSON.stringify({ provider, messages: messages.slice(-100), sessions }));
+      localStorage.setItem(PLAYBOOK_STORAGE_KEY, JSON.stringify({ provider, messages: messages.slice(-100) }));
     } catch {
       // The conversation remains available for this session when storage is unavailable.
     }
-  }, [provider, messages, sessions]);
+  }, [provider, messages]);
 
   const submit = async (text: string, workflow?: WorkflowContext, structuredLabel?: string) => {
     const clean = text.trim();
@@ -919,46 +986,21 @@ function AssistantPanel({ book, account, selected, onClear }: { book: Book; acco
     }]);
     setDraft('');
     setLoading(true);
-    setActivity(undefined);
-    const structured = Boolean(workflow || structuredLabel);
     try {
       const response = await fetch('/api/agents/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           provider,
-          sessionId: sessions[provider],
-          account: account && !/^0x0{40}$/i.test(account) ? account : undefined,
           prompt: workflow
             ? `${clean}\n\nWorkflow context:\n${JSON.stringify(workflow, null, 2)}`
             : attachment ? `${clean}\n\nAttached file: ${attachment.name}\n${attachment.text}` : clean,
         }),
       });
-      let reply: string;
-      if ((response.headers.get('Content-Type') || '').includes('text/event-stream')) {
-        // Claude Code streams: show text as it arrives (unless we're waiting for a JSON review card).
-        let streamed = false;
-        reply = await readAgentStream(response, {
-          session: (id) => setSessions((current) => ({ ...current, [provider]: id })),
-          tool: (label) => setActivity(label),
-          text: (delta) => {
-            setActivity(undefined);
-            if (structured) return;
-            setMessages((current) => (streamed
-              ? [...current.slice(0, -1), { role: 'assistant', text: current[current.length - 1].text + delta }]
-              : [...current, { role: 'assistant', text: delta }]));
-            streamed = true;
-          },
-        });
-        if (streamed) setMessages((current) => current.slice(0, -1)); // replaced by the final message below
-      } else {
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || 'The assistant could not respond.');
-        reply = String(result.reply);
-      }
-      const result = { reply };
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'The assistant could not respond.');
       let review: WorkflowReview | undefined;
-      if (structured) {
+      if (workflow || structuredLabel) {
         try {
           const json = String(result.reply).match(/\{[\s\S]*\}/)?.[0];
           const parsed = json ? JSON.parse(json) : undefined;
@@ -969,6 +1011,7 @@ function AssistantPanel({ book, account, selected, onClear }: { book: Book; acco
               risk: String(parsed.risk),
               reason: String(parsed.reason),
               owner: String(parsed.owner || 'Finance operations'),
+              actionId: parsed.actionId && parsed.actionId !== 'none' ? String(parsed.actionId) : undefined,
             };
           }
         } catch {
@@ -982,7 +1025,6 @@ function AssistantPanel({ book, account, selected, onClear }: { book: Book; acco
       setMessages((current) => [...current, { role: 'assistant', text: String(error?.message ?? error) }]);
     } finally {
       setLoading(false);
-      setActivity(undefined);
     }
   };
 
@@ -1016,9 +1058,7 @@ function AssistantPanel({ book, account, selected, onClear }: { book: Book; acco
           <h3>AI operations desk</h3>
         </div>
         <div className="assistant-head-actions">
-          {messages.length > 0 && (
-            <button className="ghost small" onClick={() => { setMessages([]); setSessions({}); }}>Clear history</button>
-          )}
+          {messages.length > 0 && <button className="ghost small" onClick={() => setMessages([])}>Clear history</button>}
           <div className="provider-switch" aria-label="AI provider">
             {(['GPT', 'Claude', 'Gemini'] as AgentName[]).map((name) => (
               <button key={name} className={provider === name ? 'active' : ''} onClick={() => setProvider(name)}>
@@ -1072,14 +1112,17 @@ function AssistantPanel({ book, account, selected, onClear }: { book: Book; acco
                     <div><span>Why this action</span><p>{message.review.reason}</p></div>
                   </div>
                   <div className="next-action-owner"><span>Owner</span><b>{message.review.owner}</b></div>
+                  {message.review.actionId && action?.id === message.review.actionId && (
+                    <div className="approval-card">
+                      <div><span>Prepared transaction · {action.role}</span><b>{action.title}</b><p>{action.detail}</p></div>
+                      <button onClick={() => send(action.title, action.address, action.abi, action.fn, action.args)}>{action.button}</button>
+                    </div>
+                  )}
+                  {message.review.actionId && action?.id !== message.review.actionId && <p className="stale-action">This prepared action is no longer valid against current chain data. Ask the assistant to prepare a fresh action.</p>}
                 </div>
-              ) : (
-                <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}>
-                  {message.role === 'assistant' ? <RichText text={message.text} /> : message.text}
-                </div>
-              )
+              ) : <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}>{message.text}</div>
             ))}
-            {loading && <div className="assistant-message assistant loading-message">{activity ? `${activity}…` : `${provider} is working…`}</div>}
+            {loading && <div className="assistant-message assistant loading-message">{provider} is working…</div>}
           </div>
         )}
       </div>
@@ -1119,7 +1162,7 @@ function AssistantPanel({ book, account, selected, onClear }: { book: Book; acco
   );
 }
 
-export function PlaybookPage({ book, s }: Props) {
+export function PlaybookPage(props: Props) {
   return (
     <div className="playbook-page">
       <div className="playbook-title">
@@ -1129,15 +1172,16 @@ export function PlaybookPage({ book, s }: Props) {
         </div>
         <p className="muted">Your assistant conversations and next actions stay here when you change views or reload.</p>
       </div>
-      <AssistantPanel book={book} account={s.account} onClear={() => {}} />
+      <AssistantPanel {...props} onClear={() => {}} />
     </div>
   );
 }
 
-export function BookPage({ book, s, onViewAll }: Props) {
+export function BookPage({ dep, s, book, send, onViewAll }: Props) {
   const [mb, setMb] = useState<MbBook>();
   const [mbErr, setMbErr] = useState<string>();
   const [selectedWorkflow, setSelectedWorkflow] = useState<WorkflowContext>();
+  useEffect(() => setSelectedWorkflow(undefined), [s.account]);
   useEffect(() => {
     if (multibaasEnabled) fetchBookFromMultiBaas().then(setMb).catch((e) => setMbErr(String(e?.message ?? e)));
   }, [book.chainTime]);
@@ -1156,8 +1200,14 @@ export function BookPage({ book, s, onViewAll }: Props) {
         }}
       />
       <div className="grid">
-        <UpcomingSettlements book={book} />
-        <NeedsAction book={book} />
+        <UpcomingSettlements book={book} onSelect={(item) => {
+          setSelectedWorkflow(item);
+          window.setTimeout(() => document.getElementById('ai-operations-desk')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 0);
+        }} />
+        <DashboardActions book={book} s={s} onSelect={(item) => {
+          setSelectedWorkflow(item);
+          window.setTimeout(() => document.getElementById('ai-operations-desk')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 0);
+        }} />
         <div className="hero">
           <span className="tag">Outstanding</span>
           <span><span className="figure">{yen(outstanding)}</span></span>
@@ -1167,7 +1217,7 @@ export function BookPage({ book, s, onViewAll }: Props) {
             {onViewAll && <button onClick={onViewAll}>View invoices</button>}
           </div>
         </div>
-        <AssistantPanel book={book} account={s.account} selected={selectedWorkflow} onClear={() => setSelectedWorkflow(undefined)} />
+        <AssistantPanel dep={dep} s={s} book={book} send={send} selected={selectedWorkflow} onClear={() => setSelectedWorkflow(undefined)} />
       </div>
       {mb && (
         <div className="grid">
