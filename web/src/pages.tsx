@@ -297,104 +297,170 @@ export function DebtorPage({ dep, s, book, send }: Props) {
   );
 }
 
+const BID_LEVELS = [
+  { ticks: 0, label: 'At fair value' },
+  { ticks: 50, label: '0.5% below fair value' },
+  { ticks: 100, label: '1% below fair value' },
+] as const;
+
 export function InvestorPage({ dep, s, book, send }: Props) {
-  const [bid, setBid] = useState('300000');
-  const [buyAmt, setBuyAmt] = useState('50000');
-  const [offset, setOffset] = useState('0');
-  const validOffset = /^\d+$/.test(offset) && Number(offset) % 10 === 0;
+  const me = s.account.toLowerCase();
+  const own = (inv: InvoiceRow) => inv.supplier.toLowerCase() === me || inv.debtor.toLowerCase() === me;
+  const listed = book.invoices.filter((inv) => inv.status === 2 && !inv.frozen);
+  const [picked, setPicked] = useState<number>();
+  const selected = listed.find((inv) => inv.id === picked && !own(inv));
+  const holdings = book.invoices.filter((inv) => !own(inv) && (inv.myTokens > 0n || inv.myPositions.length > 0));
   return (
-    <div>
-      <p className="muted">
-        Available funds {yen(book.me.jpyc)} · bid band ±{String(book.bandBps)} bps ·{' '}
-        <button className="ghost small" onClick={() => send('Approve JPYC for market', dep.jpyc, ABI.jpyc, 'approve', [dep.market, MAX])}>
-          Approve bid funding
-        </button>
-      </p>
-      <table>
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Buyer</th>
-            <th>Face</th>
-            <th>Days</th>
-            <th>Credit</th>
-            <th>Indicative</th>
-            <th>Bid price</th>
-            <th>Spread</th>
-            <th>Yield</th>
-            <th>Status</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          {book.invoices.map((inv) => {
-            const d = daysLeft(inv, book.chainTime);
-            return (
-              <tr key={inv.id}>
-                <td>
-                  {inv.id} <div className="mono muted small-text">{inv.ref}</div>
-                </td>
-                <td>{inv.debtorName || short(inv.debtor)}</td>
-                <td>{yen(inv.face)}</td>
-                <td>{d.toFixed(1)}</td>
-                <td title={`rate at registration ${pct(inv.rateAtIssueBps)}`}>
-                  G{inv.debtorGrade} · {pct(inv.rateBps)}
-                  {inv.debtorCoverageBps > 0 && <div className="muted small-text">🔒 {(inv.debtorCoverageBps / 100).toFixed(0)}% collateral</div>}
-                </td>
-                <td>{price(inv.fair)}</td>
-                <td>{inv.poolPrice ? price(inv.poolPrice) : '—'}</td>
-                <td>{inv.deviationBps !== undefined ? `${inv.deviationBps} bps` : '—'}</td>
-                <td>{inv.poolPrice ? `${impliedYield(inv.poolPrice, d).toFixed(2)}%` : pct(inv.rateBps)}</td>
-                <td>
-                  <Badge inv={inv} />
-                </td>
-                <td className="actions">
-                  {inv.status === 2 && !inv.poolCreated && (
-                    <button className="small" onClick={() => send('Create pool on curve', dep.market, ABI.market, 'createPool', [BigInt(inv.id)])}>Open bidding</button>
-                  )}
-                  {inv.poolCreated && inv.tradable && (
-                    <button
-                      className="small"
-                      disabled={!validOffset}
-                      onClick={() => send(`Post ${bid} JPYC bids`, dep.market, ABI.market, 'postBids', [BigInt(inv.id), u(bid), Number(offset), 150, deadline(book)])}
-                    >
-                      Place bid
-                    </button>
-                  )}
-                  {inv.myPositions.map((p) => (
-                    <button key={String(p.pid)} className="small ghost" onClick={() => send(`Withdraw bid position #${p.pid}`, dep.market, ABI.market, 'withdrawBids', [p.pid, deadline(book)])}>
-                      Withdraw #{String(p.pid)}
-                    </button>
-                  ))}
-                  {inv.poolCreated && inv.tradable && (
-                    <button
-                      className="small ghost"
-                      onClick={() =>
-                        send(`Buy with ${buyAmt} JPYC`, dep.market, ABI.market, 'buy', [BigInt(inv.id), u(buyAmt), (u(buyAmt) * 10n ** 18n * 100n) / (inv.fair * 102n), deadline(book)])
-                      }
-                    >
-                      Invest
-                    </button>
-                  )}
-                  {(inv.status === 4 || inv.status === 5) && inv.myTokens > 0n && (
-                    <button className="small" onClick={() => send('Redeem', dep.registry, ABI.registry, 'redeem', [BigInt(inv.id), inv.myTokens])}>Redeem</button>
-                  )}
-                  {inv.status === 2 && book.chainTime > inv.maturity + 3 * 86400 && (
-                    <button className="small danger" onClick={() => send('Mark default', dep.registry, ABI.registry, 'markDefault', [BigInt(inv.id)])}>Mark default</button>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-      <div className="row">
-        <F label="Bid size (JPYC)" value={bid} set={setBid} />
-        <F label="Price offset below indicative (ticks, ×10)" value={offset} set={setOffset} />
-        {!validOffset && <p className="form-warning">Offset must be 0 or a positive multiple of 10 ticks.</p>}
-        <F label="Investment size (JPYC)" value={buyAmt} set={setBuyAmt} />
-      </div>
+    <div className="market">
+      <section className="card market-intro">
+        <div>
+          <span className="eyebrow">Available to invest</span>
+          <b className="market-balance">{yen(book.me.jpyc)}</b>
+        </div>
+        <div className="market-ways">
+          <p><b>Invest now</b> buys invoice tokens that a supplier has already sold. You pay JPYC today and receive ¥1 per token when the buyer pays.</p>
+          <p><b>Place a bid</b> sets JPYC aside to buy tokens when a supplier chooses to get paid early. Until then your JPYC stays yours to withdraw.</p>
+        </div>
+      </section>
+
+      <section className="panel">
+        <div className="panel-title"><h3>Invoices open to investors</h3><span className="muted small-text">Select an invoice to invest or bid</span></div>
+        {listed.length === 0 ? (
+          <p className="empty-state">No approved invoices are open right now.</p>
+        ) : (
+          <table>
+            <thead>
+              <tr><th>Invoice</th><th>Buyer</th><th>Face value</th><th>Due in</th><th>Buyer credit</th><th>Price per ¥1</th><th>Yield</th><th>For sale now</th><th /></tr>
+            </thead>
+            <tbody>
+              {listed.map((inv) => {
+                const d = daysLeft(inv, book.chainTime);
+                const mine = own(inv);
+                return (
+                  <tr key={inv.id} className={selected?.id === inv.id ? 'selected' : undefined}>
+                    <td>#{inv.id} <div className="mono muted small-text">{inv.ref}</div></td>
+                    <td>{inv.debtorName || short(inv.debtor)}</td>
+                    <td>{yen(inv.face)}</td>
+                    <td>{d.toFixed(0)} days</td>
+                    <td>G{inv.debtorGrade}{inv.debtorRated ? '' : ' (unrated)'}{inv.debtorCoverageBps > 0 && <div className="muted small-text">{(inv.debtorCoverageBps / 100).toFixed(0)}% collateral</div>}</td>
+                    <td>{price(inv.poolPrice ?? inv.fair)}</td>
+                    <td>{(inv.poolPrice ? impliedYield(inv.poolPrice, d) : inv.rateBps / 100).toFixed(2)}%</td>
+                    <td>{inv.poolTokens > 0n ? yen(inv.poolTokens) : <span className="muted">None yet</span>}</td>
+                    <td className="actions">
+                      {mine ? <span className="badge closed">Your invoice</span>
+                        : !inv.tradable ? <span className="badge closed">Trading closed</span>
+                        : <button className="small" onClick={() => setPicked(inv.id)}>{selected?.id === inv.id ? 'Selected' : 'Select'}</button>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      {selected && <InvestPanel key={selected.id} inv={selected} dep={dep} book={book} send={send} />}
+
+      {holdings.length > 0 && (
+        <section className="panel">
+          <div className="panel-title"><h3>Your investments</h3></div>
+          {holdings.map((inv) => (
+            <div className="holding-row" key={inv.id}>
+              <div>
+                <b>Invoice #{inv.id} {inv.ref}</b> <Badge inv={inv} />
+                <p className="muted small-text">
+                  {inv.myTokens > 0n ? `${yen(inv.myTokens)} face value held` : 'Tokens your bids buy arrive when you withdraw the bid'}
+                  {inv.myPositions.length > 0 && ` · ${inv.myPositions.length} open bid${inv.myPositions.length > 1 ? 's' : ''}`} · due {jst(inv.maturity)}
+                </p>
+              </div>
+              <div className="row">
+                {inv.myPositions.map((p) => (
+                  <button key={String(p.pid)} className="small ghost" title="Returns your unused JPYC plus any invoice tokens your bid bought"
+                    onClick={() => send(`Withdraw bid #${p.pid}`, dep.market, ABI.market, 'withdrawBids', [p.pid, deadline(book)])}>
+                    Withdraw bid #{String(p.pid)}
+                  </button>
+                ))}
+                {(inv.status === 4 || inv.status === 5) && inv.myTokens > 0n && (
+                  <button className="small" onClick={() => send(`Redeem invoice #${inv.id}`, dep.registry, ABI.registry, 'redeem', [BigInt(inv.id), inv.myTokens])}>
+                    Collect {inv.status === 4 ? yen(inv.myTokens) : 'recovery'}
+                  </button>
+                )}
+                {inv.status === 2 && inv.myTokens > 0n && book.chainTime > inv.maturity + 3 * 86400 && (
+                  <button className="small danger" title="The buyer missed payment past the 3-day grace period. Marking default releases their collateral to holders."
+                    onClick={() => send(`Mark invoice #${inv.id} as defaulted`, dep.registry, ABI.registry, 'markDefault', [BigInt(inv.id)])}>
+                    Mark overdue as default
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </section>
+      )}
     </div>
+  );
+}
+
+function InvestPanel({ inv, dep, book, send }: { inv: InvoiceRow; dep: Deployment; book: Book; send: Send }) {
+  const [buyAmt, setBuyAmt] = useState('50000');
+  const [bidAmt, setBidAmt] = useState('300000');
+  const [level, setLevel] = useState(0);
+  const d = daysLeft(inv, book.chainTime);
+  const px = inv.poolPrice ?? inv.fair;
+  const buyIn = u(buyAmt);
+  const estTokens = px > 0n ? (buyIn * 10n ** 18n) / px : 0n;
+  const bidIn = u(bidAmt);
+  const approved = (amount: bigint) => book.me.jpycAllowanceMarket >= amount;
+  const approve = () => send('Allow the market to use your JPYC', dep.jpyc, ABI.jpyc, 'approve', [dep.market, MAX]);
+  const buyProblem = inv.poolTokens === 0n ? 'No tokens are for sale yet. Place a bid instead, or check back after the supplier sells.'
+    : buyIn === 0n ? 'Enter an amount.'
+    : buyIn > book.me.jpyc ? `You have ${yen(book.me.jpyc)}.`
+    : estTokens > inv.poolTokens ? `Only ${yen(inv.poolTokens)} face value is for sale. Try a smaller amount.`
+    : '';
+  const bidProblem = bidIn === 0n ? 'Enter an amount.' : bidIn > book.me.jpyc ? `You have ${yen(book.me.jpyc)}.` : '';
+  return (
+    <section className="grid invest-panel">
+      <div className="card">
+        <span className="eyebrow">Invoice #{inv.id} · {inv.debtorName || short(inv.debtor)} · due {jst(inv.maturity)}</span>
+        <h3>Invest now</h3>
+        <p className="muted small-text">{inv.poolTokens > 0n ? `${yen(inv.poolTokens)} face value for sale at about ${price(px)} per ¥1.` : 'Nothing for sale yet.'}</p>
+        <F label="Amount to invest (JPYC)" value={buyAmt} set={setBuyAmt} />
+        {!buyProblem && (
+          <p className="small-text">You receive about <b>{yen(estTokens)}</b> at maturity, a return of about <b>{yen(estTokens - buyIn)}</b> ({impliedYield(px, d).toFixed(2)}% a year).</p>
+        )}
+        {buyProblem && <p className="form-warning">{buyProblem}</p>}
+        <div className="row">
+          {!buyProblem && !approved(buyIn) && <button onClick={approve}>1. Allow JPYC</button>}
+          <button disabled={Boolean(buyProblem) || !approved(buyIn)}
+            onClick={() => send(`Invest ${buyAmt} JPYC in invoice #${inv.id}`, dep.market, ABI.market, 'buy', [BigInt(inv.id), buyIn, (estTokens * 98n) / 100n, deadline(book)])}>
+            {!buyProblem && !approved(buyIn) ? '2. Invest' : 'Invest'}
+          </button>
+        </div>
+      </div>
+      <div className="card">
+        <span className="eyebrow">Invoice #{inv.id}</span>
+        <h3>Place a bid</h3>
+        <p className="muted small-text">Your JPYC waits in the pool. When the supplier sells to get paid early, your bid buys their tokens. Withdraw any time from Your investments.</p>
+        <F label="Amount to set aside (JPYC)" value={bidAmt} set={setBidAmt} />
+        <label className="field">
+          <span>Bid price</span>
+          <select value={level} onChange={(e) => setLevel(Number(e.target.value))}>
+            {BID_LEVELS.map((b, i) => <option key={b.ticks} value={i}>{b.label}</option>)}
+          </select>
+        </label>
+        {bidProblem && <p className="form-warning">{bidProblem}</p>}
+        <div className="row">
+          {!inv.poolCreated ? (
+            <button onClick={() => send(`Open invoice #${inv.id} for bids`, dep.market, ABI.market, 'createPool', [BigInt(inv.id)])}>1. Open for bids</button>
+          ) : !bidProblem && !approved(bidIn) ? (
+            <button onClick={approve}>1. Allow JPYC</button>
+          ) : null}
+          <button disabled={Boolean(bidProblem) || !inv.poolCreated || !approved(bidIn)}
+            onClick={() => send(`Bid ${bidAmt} JPYC on invoice #${inv.id}`, dep.market, ABI.market, 'postBids', [BigInt(inv.id), bidIn, BID_LEVELS[level].ticks, 150, deadline(book)])}>
+            {!inv.poolCreated || (!bidProblem && !approved(bidIn)) ? '2. Place bid' : 'Place bid'}
+          </button>
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -736,7 +802,8 @@ function DashboardActions({ book, s, onSelect }: { book: Book; s: Session; onSel
   const me = s.account.toLowerCase();
   const rows = role === 'Capital'
     ? book.invoices
-      .filter((invoice) => invoice.status === 2 && invoice.poolCreated && invoice.tradable)
+      .filter((invoice) => invoice.status === 2 && invoice.poolCreated && invoice.tradable
+        && invoice.supplier.toLowerCase() !== me && invoice.debtor.toLowerCase() !== me)
       .sort((a, b) => a.debtorGrade - b.debtorGrade || a.maturity - b.maturity)
       .slice(0, 6)
       .map((invoice) => ({ invoice, label: 'Review investment', detail: `${price(invoice.fair)} · G${invoice.debtorGrade} · ${Math.ceil(daysLeft(invoice, book.chainTime))}d` }))
@@ -947,18 +1014,22 @@ function preparedAction(dep: Deployment, s: Session, book: Book): PreparedAction
     return undefined;
   }
   const amount = 50_000n * 10n ** 18n;
+  const me = s.account.toLowerCase();
+  // Only invoices the investor is not a party to, with enough tokens for sale to fill ¥50,000.
+  const target = book.invoices.find((invoice) => invoice.poolCreated && invoice.tradable && invoice.status === 2
+    && invoice.supplier.toLowerCase() !== me && invoice.debtor.toLowerCase() !== me
+    && invoice.poolPrice !== undefined && (amount * 10n ** 18n) / invoice.poolPrice <= invoice.poolTokens);
+  if (!target || book.me.jpyc < amount) return undefined;
   if (book.me.jpycAllowanceMarket < amount) return {
     id: 'capital:approve-market', role, title: 'Approve JPYC for marketplace investing',
     detail: 'Authorize the marketplace before placing bids or purchasing invoice positions.', button: 'Confirm JPYC approval in wallet',
     address: dep.jpyc, abi: ABI.jpyc, fn: 'approve', args: [dep.market, MAX],
   };
-  const target = book.invoices.find((invoice) => invoice.poolCreated && invoice.tradable && invoice.status === 2);
-  if (!target || book.me.jpyc < amount) return undefined;
   return {
     id: `capital:buy:${target.id}`, role, title: `Invest ¥50,000 in invoice #${target.id}`,
     detail: `${target.ref} is tradable; execution includes 2% price protection and a ten-minute deadline.`, button: 'Confirm investment in wallet',
     address: dep.market, abi: ABI.market, fn: 'buy',
-    args: [BigInt(target.id), amount, (amount * 10n ** 18n * 100n) / (target.fair * 102n), deadline(book)],
+    args: [BigInt(target.id), amount, (amount * 10n ** 18n * 98n) / (target.poolPrice! * 100n), deadline(book)],
   };
 }
 

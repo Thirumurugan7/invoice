@@ -31,6 +31,7 @@ export type InvoiceRow = {
   poolPrice?: bigint;
   deviationBps?: bigint;
   myTokens: bigint;
+  poolTokens: bigint; // invoice tokens sitting in the pool, i.e. what Invest can buy right now
   myPositions: { pid: bigint; liquidity: bigint }[]; // open TegataMarket bid positions
 };
 
@@ -133,7 +134,10 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
         ]);
         let poolPrice: bigint | undefined;
         let deviationBps: bigint | undefined;
+        let poolTokens = 0n;
         if (poolCreated) {
+          // Each invoice token only trades in its own pool, so the PoolManager's balance of it is that pool's inventory.
+          poolTokens = await r(inv.token, ABI.token, 'balanceOf', [dep.poolManager]);
           const key = await r(dep.market, ABI.market, 'keyOf', [BigInt(id)]);
           poolPrice = await r(dep.hook, ABI.hook, 'poolPrice', [key]);
           deviationBps = await r(dep.hook, ABI.hook, 'deviationBps', [poolPrice, fair]);
@@ -164,6 +168,7 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
           poolPrice,
           deviationBps,
           myTokens,
+          poolTokens,
           myPositions: positions.filter((p) => p.invoiceId === id && p.liquidity > 0n),
         });
       }

@@ -561,3 +561,14 @@ td.actions { display: flex; gap: 6px; flex-wrap: wrap; }
   .consumer-hero h2 { font-size: 28px; }
   .advance-total b { font-size: 38px; }
 }
+
+/* Marketplace */
+.market-intro { display: grid; grid-template-columns: minmax(160px, 220px) 1fr; gap: 18px; align-items: center; margin-bottom: 18px; }
+.market-balance { display: block; font-size: 26px; margin-top: 4px; }
+.market-ways p { margin: 0 0 6px; font-size: 13px; }
+.market tr.selected td { background: var(--paper-sunk); }
+.invest-panel { margin-bottom: 18px; }
+.invest-panel h3 { margin: 6px 0; }
+.holding-row { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; align-items: center; padding: 10px 0; border-top: 1px solid var(--line, rgb(0 0 0 / 0.06)); }
+.holding-row:first-of-type { border-top: 0; }
+@media (max-width: 640px) { .market-intro { grid-template-columns: 1fr; } }
