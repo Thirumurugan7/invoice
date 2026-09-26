@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { isAddress, keccak256, parseUnits, toBytes, type Address } from 'viem';
 import { ABI, sha256File, type Deployment, type Session } from './chain';
 import { jst, price, short, yen } from './errors';
@@ -448,7 +448,33 @@ export function ActivityPage({ book }: Props) {
 
 const CALENDAR_DAYS = 17;
 
-function MaturityBoard({ book }: { book: Book }) {
+type WorkflowContext = {
+  key: string;
+  invoiceId: string;
+  reference: string;
+  stage: string;
+  status: string;
+  supplier: string;
+  buyer: string;
+  buyerGrade: string;
+  faceValue: string;
+  funded: string;
+  dueDate: string;
+};
+
+const workflowPrompt = (item: WorkflowContext) => [
+  `Review invoice #${item.invoiceId} (${item.reference}) at the "${item.stage}" stage.`,
+  `Status: ${item.status}`,
+  `Supplier: ${item.supplier}`,
+  `Buyer: ${item.buyer} (${item.buyerGrade})`,
+  `Face value: ${item.faceValue}`,
+  `Funded: ${item.funded}`,
+  `Due date: ${item.dueDate}`,
+  '',
+  'Identify the most important risk or blocker, recommend the single next best action, and give a short reason. Keep the answer practical for a finance operator.',
+].join('\n');
+
+function MaturityBoard({ book, selected, onSelect }: { book: Book; selected?: WorkflowContext; onSelect: (item: WorkflowContext) => void }) {
   const [showAll, setShowAll] = useState(false);
   const open = book.invoices.filter((i) => i.status === 1 || i.status === 2);
   const focus = [...open].sort((a, b) => a.maturity - b.maturity)[0];
@@ -473,6 +499,19 @@ function MaturityBoard({ book }: { book: Book }) {
     { key: 'liquidity', name: 'Liquidity desk', meta: `${yen(focus.face)} face value`, initial: 'L', start: 8, end: 14, tone: 'purple', label: 'Funding window', status: focus.funded > 0n ? 'Funded' : 'Ready' },
     { key: 'settlement', name: 'Settlement account', meta: `Due ${jst(focus.maturity).split(' ')[0]}`, initial: 'S', start: Math.max(0, dueIndex - 3), end: Math.min(columnCount - 1, dueIndex + 2), tone: 'green', label: 'Settlement', status: dueIndex <= todayIndex + 2 ? 'Due soon' : 'Scheduled' },
   ] : [];
+  const contextFor = (lane: typeof lanes[number]): WorkflowContext => ({
+    key: lane.key,
+    invoiceId: String(focus?.id ?? ''),
+    reference: focus?.ref || 'No reference',
+    stage: lane.label,
+    status: lane.status,
+    supplier: focus?.supplierName || (focus ? short(focus.supplier) : ''),
+    buyer: focus?.debtorName || (focus ? short(focus.debtor) : ''),
+    buyerGrade: `Grade ${focus?.debtorGrade ?? 'unrated'}`,
+    faceValue: focus ? yen(focus.face) : '',
+    funded: focus ? yen(focus.funded) : '',
+    dueDate: focus ? jst(focus.maturity) : '',
+  });
 
   return (
     <section className="panel schedule-panel">
@@ -509,8 +548,26 @@ function MaturityBoard({ book }: { book: Book }) {
                   <div className="schedule-track">
                     {calendar.map((date) => <i className={date.weekend ? 'weekend' : ''} key={date.index} />)}
                     <div
-                      className={`schedule-event ${lane.tone}`}
+                      className={`schedule-event ${lane.tone}${selected?.key === lane.key ? ' selected' : ''}`}
                       style={{ gridColumn: `${lane.start + 1} / ${lane.end + 2}` }}
+                      role="button"
+                      tabIndex={0}
+                      draggable
+                      aria-label={`${lane.label}, ${lane.status}. Click to review or drag to the AI operations desk.`}
+                      onClick={() => onSelect(contextFor(lane))}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault();
+                          onSelect(contextFor(lane));
+                        }
+                      }}
+                      onDragStart={(event) => {
+                        const item = contextFor(lane);
+                        event.dataTransfer.effectAllowed = 'copy';
+                        event.dataTransfer.setData('application/x-invoice-workflow', JSON.stringify(item));
+                        event.dataTransfer.setData('text/plain', workflowPrompt(item));
+                        onSelect(item);
+                      }}
                     >
                       <span>{lane.label}</span>
                       <b>{lane.status}</b>
@@ -581,14 +638,16 @@ type AssistantMessage = { role: 'user' | 'assistant'; text: string };
 type AgentName = 'GPT' | 'Claude' | 'Gemini';
 type AgentStatus = Record<AgentName, boolean>;
 
-function AssistantPanel() {
+function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onClear: () => void }) {
   const [provider, setProvider] = useState<AgentName>('GPT');
   const [draft, setDraft] = useState('');
   const [messages, setMessages] = useState<AssistantMessage[]>([]);
   const [status, setStatus] = useState<AgentStatus>({ GPT: false, Claude: false, Gemini: false });
   const [statusReady, setStatusReady] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [draggingOver, setDraggingOver] = useState(false);
   const [attachment, setAttachment] = useState<{ name: string; text: string }>();
+  const panelRef = useRef<HTMLElement>(null);
   const shortcuts = ['Review invoice risk', 'Prepare settlement report', 'Summarize investor bids'];
 
   useEffect(() => {
@@ -599,7 +658,7 @@ function AssistantPanel() {
       .finally(() => setStatusReady(true));
   }, []);
 
-  const submit = async (text: string) => {
+  const submit = async (text: string, workflow?: WorkflowContext) => {
     const clean = text.trim();
     if (!clean || loading) return;
     if (!status[provider]) {
@@ -615,13 +674,16 @@ function AssistantPanel() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           provider,
-          prompt: attachment ? `${clean}\n\nAttached file: ${attachment.name}\n${attachment.text}` : clean,
+          prompt: workflow
+            ? `${clean}\n\nWorkflow context:\n${JSON.stringify(workflow, null, 2)}`
+            : attachment ? `${clean}\n\nAttached file: ${attachment.name}\n${attachment.text}` : clean,
         }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'The assistant could not respond.');
       setMessages((current) => [...current, { role: 'assistant', text: result.reply }]);
       setAttachment(undefined);
+      if (workflow) onClear();
     } catch (error: any) {
       setMessages((current) => [...current, { role: 'assistant', text: String(error?.message ?? error) }]);
     } finally {
@@ -630,7 +692,29 @@ function AssistantPanel() {
   };
 
   return (
-    <section className="assistant-panel">
+    <section
+      id="ai-operations-desk"
+      ref={panelRef}
+      className={`assistant-panel${draggingOver ? ' drag-target' : ''}`}
+      onDragOver={(event) => {
+        if (event.dataTransfer.types.includes('application/x-invoice-workflow')) {
+          event.preventDefault();
+          event.dataTransfer.dropEffect = 'copy';
+          setDraggingOver(true);
+        }
+      }}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node)) setDraggingOver(false);
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        setDraggingOver(false);
+        const raw = event.dataTransfer.getData('application/x-invoice-workflow');
+        if (!raw) return;
+        const item = JSON.parse(raw) as WorkflowContext;
+        submit(workflowPrompt(item), item);
+      }}
+    >
       <div className="assistant-head">
         <div>
           <span className="eyebrow">Workflow assistant</span>
@@ -644,6 +728,20 @@ function AssistantPanel() {
           ))}
         </div>
       </div>
+
+      {selected && (
+        <div className="workflow-review-card">
+          <div>
+            <span className="eyebrow">Selected workflow</span>
+            <b>Invoice #{selected.invoiceId} · {selected.stage}</b>
+            <span>{selected.status} · {selected.faceValue} · due {selected.dueDate.split(' ')[0]}</span>
+          </div>
+          <button className="ghost small" onClick={() => submit(workflowPrompt(selected), selected)} disabled={loading || !statusReady || !status[provider]}>Review next action</button>
+          <button className="workflow-clear" onClick={onClear} aria-label="Clear selected workflow">×</button>
+        </div>
+      )}
+
+      {draggingOver && <div className="workflow-drop-overlay">Drop to review the next best action</div>}
 
       <div className="assistant-body">
         {messages.length === 0 ? (
@@ -695,6 +793,7 @@ function AssistantPanel() {
 export function BookPage({ book, onViewAll }: Props) {
   const [mb, setMb] = useState<MbBook>();
   const [mbErr, setMbErr] = useState<string>();
+  const [selectedWorkflow, setSelectedWorkflow] = useState<WorkflowContext>();
   useEffect(() => {
     if (multibaasEnabled) fetchBookFromMultiBaas().then(setMb).catch((e) => setMbErr(String(e?.message ?? e)));
   }, [book.chainTime]);
@@ -704,7 +803,14 @@ export function BookPage({ book, onViewAll }: Props) {
 
   return (
     <div>
-      <MaturityBoard book={book} />
+      <MaturityBoard
+        book={book}
+        selected={selectedWorkflow}
+        onSelect={(item) => {
+          setSelectedWorkflow(item);
+          window.setTimeout(() => document.getElementById('ai-operations-desk')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 0);
+        }}
+      />
       <div className="grid">
         <UpcomingSettlements book={book} />
         <NeedsAction book={book} />
@@ -717,7 +823,7 @@ export function BookPage({ book, onViewAll }: Props) {
             {onViewAll && <button onClick={onViewAll}>View invoices</button>}
           </div>
         </div>
-        <AssistantPanel />
+        <AssistantPanel selected={selectedWorkflow} onClear={() => setSelectedWorkflow(undefined)} />
       </div>
       {mb && (
         <div className="grid">

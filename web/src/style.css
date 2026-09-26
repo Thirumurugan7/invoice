@@ -296,7 +296,10 @@ td.actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .schedule-track { position: relative; display: grid; grid-template-columns: repeat(var(--calendar-days), 44px); gap: 5px; }
 .schedule-track > i { grid-row: 1; width: 44px; border-radius: 10px; background: rgb(255 255 255 / 0.5); }
 .schedule-track > i.weekend { background: repeating-linear-gradient(135deg, #d8dbe0, #d8dbe0 4px, #eceeeb 4px, #eceeeb 9px); }
-.schedule-event { z-index: 2; grid-row: 1; align-self: center; min-width: 0; height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 12px; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 20px -14px rgb(19 19 21 / 0.45); }
+.schedule-event { z-index: 2; grid-row: 1; align-self: center; min-width: 0; height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 12px; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 20px -14px rgb(19 19 21 / 0.45); cursor: grab; transition: transform 160ms ease, box-shadow 160ms ease; }
+.schedule-event:hover { transform: translateY(-2px); box-shadow: 0 14px 24px -14px rgb(19 19 21 / 0.58); }
+.schedule-event:active { cursor: grabbing; }
+.schedule-event:focus-visible, .schedule-event.selected { outline: 3px solid rgb(48 129 239 / 0.38); outline-offset: 2px; }
 .schedule-event.green { color: #075d3d; background: linear-gradient(100deg, #16c77c, #8de6c0); }
 .schedule-event.purple { color: white; background: linear-gradient(100deg, #8145ef, #bd91ff); }
 .schedule-event.blue { color: #245785; background: linear-gradient(100deg, #b5d6fa, #76aef2); }
@@ -361,9 +364,19 @@ td.actions { display: flex; gap: 6px; flex-wrap: wrap; }
   background: rgb(246 246 244 / 0.82);
   box-shadow: var(--lift);
   backdrop-filter: blur(20px);
+  position: relative;
+  transition: box-shadow 160ms ease, border-color 160ms ease;
 }
+.assistant-panel.drag-target { border-color: #3081ef; box-shadow: 0 0 0 4px rgb(48 129 239 / 0.16), var(--lift-high); }
 .assistant-head { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 24px 26px 18px; border-bottom: 1px solid var(--bone); }
 .assistant-head h3 { margin: 0; }
+.workflow-review-card { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; margin: 14px 18px 0; padding: 12px 14px; border-radius: 16px; color: #245785; background: #d7e8fb; }
+.workflow-review-card > div { min-width: 0; }
+.workflow-review-card b, .workflow-review-card span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workflow-review-card b { font-size: 13px; }
+.workflow-review-card span:last-child { margin-top: 2px; font-size: 11px; opacity: 0.78; }
+.workflow-clear { width: 30px; height: 30px; padding: 0; color: #245785; background: transparent; font-size: 20px; }
+.workflow-drop-overlay { position: absolute; z-index: 6; inset: 82px 16px 16px; display: grid; place-items: center; border: 2px dashed #3081ef; border-radius: 22px; color: #245785; background: rgb(215 232 251 / 0.92); font-size: 16px; font-weight: 700; pointer-events: none; }
 .provider-switch { display: flex; gap: 4px; padding: 4px; border-radius: var(--r-pill); background: var(--bone); }
 .provider-switch button { display: inline-flex; align-items: center; gap: 6px; padding: 7px 11px; color: var(--muted); background: transparent; font-size: 11px; }
 .provider-switch button.active { color: var(--on-ink); background: var(--ink); box-shadow: var(--lift); }
