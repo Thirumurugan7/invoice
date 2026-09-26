@@ -670,6 +670,30 @@ type WorkflowReview = { nextAction: string; urgency: string; risk: string; reaso
 type AssistantMessage = { role: 'user' | 'assistant'; text: string; review?: WorkflowReview };
 type AgentName = 'GPT' | 'Claude' | 'Gemini';
 type AgentStatus = Record<AgentName, boolean>;
+const MAX_ATTACHMENT_CHARS = 30_000;
+
+async function readAssistantAttachment(file: File) {
+  if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+    const pdfjs = await import('pdfjs-dist');
+    pdfjs.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString();
+    const document = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+    const pages: string[] = [];
+    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+      const page = await document.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const text = content.items
+        .map((item) => ('str' in item ? item.str : ''))
+        .filter(Boolean)
+        .join(' ');
+      pages.push(`[Page ${pageNumber}]\n${text}`);
+      if (pages.join('\n\n').length >= MAX_ATTACHMENT_CHARS) break;
+    }
+    const extracted = pages.join('\n\n').slice(0, MAX_ATTACHMENT_CHARS).trim();
+    if (!extracted) throw new Error('This PDF does not contain readable text. Scanned PDFs need OCR before attachment.');
+    return extracted;
+  }
+  return (await file.text()).slice(0, MAX_ATTACHMENT_CHARS);
+}
 
 const reviewSchema = [
   'Return only valid JSON with this exact shape:',
@@ -718,6 +742,7 @@ function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: Wo
   const [loading, setLoading] = useState(false);
   const [draggingOver, setDraggingOver] = useState(false);
   const [attachment, setAttachment] = useState<{ name: string; text: string }>();
+  const [attachmentError, setAttachmentError] = useState<string>();
   const panelRef = useRef<HTMLElement>(null);
   const snapshot = portfolioSnapshot(book);
   const shortcuts = [
@@ -898,10 +923,19 @@ function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: Wo
               {attachment ? attachment.name : 'Attach file'}
               <input
                 type="file"
-                accept=".txt,.md,.json,.csv,text/plain,text/markdown,application/json,text/csv"
+                accept=".pdf,.txt,.md,.json,.csv,application/pdf,text/plain,text/markdown,application/json,text/csv"
                 onChange={async (event) => {
                   const file = event.target.files?.[0];
-                  if (file) setAttachment({ name: file.name, text: (await file.text()).slice(0, 30_000) });
+                  if (!file) return;
+                  setAttachmentError(undefined);
+                  try {
+                    setAttachment({ name: file.name, text: await readAssistantAttachment(file) });
+                  } catch (error: any) {
+                    setAttachment(undefined);
+                    setAttachmentError(String(error?.message ?? 'Could not read this file.'));
+                  } finally {
+                    event.target.value = '';
+                  }
                 }}
               />
             </label>
@@ -909,6 +943,8 @@ function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: Wo
           </div>
           <button type="submit" className="send-button" disabled={!draft.trim() || loading || !statusReady || !status[provider]} aria-label="Send message">↑</button>
         </div>
+        {attachmentError && <p className="attachment-error" role="alert">{attachmentError}</p>}
+        {attachment && <p className="attachment-ready">PDF or document ready · {attachment.text.length.toLocaleString()} characters extracted</p>}
       </form>
     </section>
   );
