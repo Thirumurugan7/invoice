@@ -479,7 +479,7 @@ function MaturityBoard({ book }: { book: Book }) {
       <div className="timeline-metrics">
         <div><span>Open face value</span><b>{yen(total)}</b></div>
         <div><span>Liquidity received</span><b>{yen(funded)}</b></div>
-        <div><span>Next settlement</span><b>{nextDue ? `${Math.ceil(daysLeft(nextDue, book.chainTime))} days` : '—'}</b></div>
+        <div><span>Next settlement</span><b>{nextDue ? `${Math.ceil(daysLeft(nextDue, book.chainTime))} ${Math.ceil(daysLeft(nextDue, book.chainTime)) === 1 ? 'day' : 'days'}` : '—'}</b></div>
       </div>
       {open.length === 0 ? (
         <p className="empty-state">No open invoices on the books right now.</p>
@@ -588,11 +588,17 @@ function AssistantPanel() {
   const [draft, setDraft] = useState('');
   const [messages, setMessages] = useState<AssistantMessage[]>([]);
   const [status, setStatus] = useState<AgentStatus>({ GPT: false, Claude: false, Gemini: false });
+  const [statusReady, setStatusReady] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [attachment, setAttachment] = useState<{ name: string; text: string }>();
   const shortcuts = ['Review invoice risk', 'Prepare settlement report', 'Summarize investor bids'];
 
   useEffect(() => {
-    fetch('/api/agents/status').then((response) => response.json()).then(setStatus).catch(() => {});
+    fetch('/api/agents/status', { cache: 'no-store' })
+      .then((response) => response.json())
+      .then(setStatus)
+      .catch(() => {})
+      .finally(() => setStatusReady(true));
   }, []);
 
   const submit = async (text: string) => {
@@ -609,11 +615,15 @@ function AssistantPanel() {
       const response = await fetch('/api/agents/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider, prompt: clean }),
+        body: JSON.stringify({
+          provider,
+          prompt: attachment ? `${clean}\n\nAttached file: ${attachment.name}\n${attachment.text}` : clean,
+        }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'The assistant could not respond.');
       setMessages((current) => [...current, { role: 'assistant', text: result.reply }]);
+      setAttachment(undefined);
     } catch (error: any) {
       setMessages((current) => [...current, { role: 'assistant', text: String(error?.message ?? error) }]);
     } finally {
@@ -643,8 +653,8 @@ function AssistantPanel() {
             <div className="assistant-symbol" aria-hidden="true"><span /><span /><span /></div>
             <h2>Welcome to your finance desk</h2>
             <p>What should {provider} handle today?</p>
-            <div className={status[provider] ? 'connection-state connected' : 'connection-state'}>
-              <span />{status[provider] ? `${provider} subscription connected` : provider === 'Gemini' ? 'Gemini CLI installation required' : `${provider} sign-in required`}
+            <div className={statusReady && status[provider] ? 'connection-state connected' : 'connection-state'}>
+              <span />{!statusReady ? 'Checking connection…' : status[provider] ? `${provider} subscription connected` : provider === 'Gemini' ? 'Gemini CLI installation required' : `${provider} sign-in required`}
             </div>
             <div className="assistant-shortcuts">
               {shortcuts.map((label) => <button key={label} onClick={() => submit(label)}>{label}</button>)}
@@ -664,10 +674,20 @@ function AssistantPanel() {
         <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder={`Ask ${provider} to create a workflow...`} rows={2} />
         <div className="composer-actions">
           <div>
-            <button type="button" className="ghost small">Attach file</button>
-            <button type="button" className="ghost small">Create</button>
+            <label className="assistant-file-button">
+              {attachment ? attachment.name : 'Attach file'}
+              <input
+                type="file"
+                accept=".txt,.md,.json,.csv,text/plain,text/markdown,application/json,text/csv"
+                onChange={async (event) => {
+                  const file = event.target.files?.[0];
+                  if (file) setAttachment({ name: file.name, text: (await file.text()).slice(0, 30_000) });
+                }}
+              />
+            </label>
+            <button type="button" className="ghost small" onClick={() => setDraft('Create a workflow that ')}>Create</button>
           </div>
-          <button type="submit" className="send-button" disabled={!draft.trim() || loading || !status[provider]} aria-label="Send message">↑</button>
+          <button type="submit" className="send-button" disabled={!draft.trim() || loading || !statusReady || !status[provider]} aria-label="Send message">↑</button>
         </div>
       </form>
     </section>

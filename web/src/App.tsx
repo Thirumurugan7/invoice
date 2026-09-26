@@ -106,6 +106,8 @@ export default function App() {
   const [picker, setPicker] = useState(false);
   const [wrongChain, setWrongChain] = useState<number>();
   const [connectErr, setConnectErr] = useState<string>();
+  const [search, setSearch] = useState('');
+  const [workspace, setWorkspace] = useState('Treasury Operations');
   const refresh = useCallback(() => setTick((t) => t + 1), []);
   const local = dep?.chainId === 31337;
 
@@ -199,6 +201,23 @@ export default function App() {
   if (loadErr) return <div className="shell"><p className="error">{loadErr}</p></div>;
   if (!dep || !s) return <div className="shell">Loading…</div>;
   const connected = s.kind !== 'readonly';
+  const runSearch = () => {
+    const value = search.trim().toLowerCase();
+    if (!value) return;
+    if (/permission|wallet|sign/.test(value)) setTab('Permissions');
+    else if (/activity|transaction|settlement/.test(value)) setTab('Activity');
+    else if (/admin|operator|company|credit/.test(value)) setTab('Operator');
+    else if (/sell|upload|early/.test(value)) setTab('Sell');
+    else if (/invest|bid|market|buyer/.test(value)) setTab('Marketplace');
+    else setTab('Invoices');
+  };
+  const selectWorkspace = (value: string) => {
+    setWorkspace(value);
+    if (!local) return;
+    const index = value === 'Treasury Operations' ? 0 : value === 'Capital Account' ? 3 : 1;
+    setS(devSession(DEV_ACCOUNTS[index].key, dep.chainId));
+    setTab(index === 0 ? 'Operator' : index === 3 ? 'Invest' : 'Sell');
+  };
 
   return (
     <div className="shell">
@@ -219,9 +238,14 @@ export default function App() {
           </div>
           <label className="global-search">
             <span>Search</span>
-            <input placeholder="Invoice, buyer, settlement" />
+            <input
+              value={search}
+              placeholder="Invoice, buyer, settlement"
+              onChange={(event) => setSearch(event.target.value)}
+              onKeyDown={(event) => { if (event.key === 'Enter') runSearch(); }}
+            />
           </label>
-          <select className="company-switcher" aria-label="Company account">
+          <select className="company-switcher" aria-label="Company account" value={workspace} onChange={(event) => selectWorkspace(event.target.value)}>
             <option>Treasury Operations</option>
             <option>Seller Account</option>
             <option>Capital Account</option>

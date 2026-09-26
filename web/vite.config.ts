@@ -78,6 +78,7 @@ function localAgentBridge() {
     configureServer(server: any) {
       server.middlewares.use('/api/agents/status', async (_req: any, res: any) => {
         res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Cache-Control', 'no-store');
         res.end(JSON.stringify(await connectionStatus()));
       });
       server.middlewares.use('/api/agents/chat', (req: any, res: any) => {
