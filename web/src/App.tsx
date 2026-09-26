@@ -23,14 +23,12 @@ import { jst, short, yen } from './errors';
 import { ActivityPage, BookPage, DebtorPage, InvestorPage, OperatorPage, PermissionsPage, PlaybookPage, SupplierPage } from './pages';
 import { useBook, useTx, type Book, type TxStatus } from './state';
 
-const TABS = ['Book', 'Invoices', 'Marketplace', 'Sell', 'Invest', 'Permissions', 'Activity', 'Playbook', 'Operator'] as const;
+const TABS = ['Book', 'Invoices', 'Marketplace', 'Playbook', 'Activity', 'Permissions', 'Operator'] as const;
 type Tab = (typeof TABS)[number];
 const TAB_LABEL: Record<Tab, string> = {
   Book: 'Dashboard',
   Invoices: 'Invoices',
   Marketplace: 'Marketplace',
-  Sell: 'Sell Invoice',
-  Invest: 'Invest',
   Permissions: 'Wallet & Permissions',
   Activity: 'Transaction Activity',
   Playbook: 'Playbook',
@@ -51,16 +49,6 @@ const TAB_ICON: Record<Tab, JSX.Element> = {
   Marketplace: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <path d="M4 9h16" /><path d="M6 9l1-4h10l1 4" /><path d="M7 9v10" /><path d="M17 9v10" /><path d="M4 19h16" />
-    </svg>
-  ),
-  Sell: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 20V6" /><path d="M6 12l6-6 6 6" /><path d="M5 20h14" />
-    </svg>
-  ),
-  Invest: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M4 18l5-5 4 4 7-7" /><path d="M14 10h6v6" />
     </svg>
   ),
   Permissions: (
@@ -200,8 +188,8 @@ export default function App() {
     const me = s.account.toLowerCase();
     if (book.me.isOperator) setTab('Operator');
     else if (book.invoices.some((i) => i.debtor.toLowerCase() === me)) setTab('Invoices');
-    else if (book.me.name || book.invoices.some((i) => i.supplier.toLowerCase() === me)) setTab('Sell');
-    else setTab('Invest');
+    else if (book.me.name || book.invoices.some((i) => i.supplier.toLowerCase() === me)) setTab('Invoices');
+    else setTab('Marketplace');
   }, [book, s]);
 
   if (loadErr) return <div className="shell"><p className="error">{loadErr}</p></div>;
@@ -214,7 +202,7 @@ export default function App() {
     else if (/activity|transaction|settlement/.test(value)) setTab('Activity');
     else if (/playbook|chat|assistant|action/.test(value)) setTab('Playbook');
     else if (/admin|operator|company|credit/.test(value)) setTab('Operator');
-    else if (/sell|upload|early/.test(value)) setTab('Sell');
+    else if (/sell|upload|early|invoice/.test(value)) setTab('Invoices');
     else if (/invest|bid|market|buyer/.test(value)) setTab('Marketplace');
     else setTab('Invoices');
   };
@@ -223,7 +211,7 @@ export default function App() {
     if (!local) return;
     const index = value === 'Treasury Operations' ? 0 : value === 'Capital Account' ? 3 : 1;
     setS(devSession(DEV_ACCOUNTS[index].key, dep.chainId));
-    setTab(index === 0 ? 'Operator' : index === 3 ? 'Invest' : 'Sell');
+    setTab(index === 0 ? 'Operator' : index === 3 ? 'Marketplace' : 'Invoices');
   };
 
   return (
@@ -257,7 +245,7 @@ export default function App() {
             <option>Seller Account</option>
             <option>Capital Account</option>
           </select>
-          <button className="upload-cta" onClick={() => setTab('Sell')}>Upload Invoice</button>
+          <button className="upload-cta" onClick={() => setTab('Invoices')}>Upload Invoice</button>
           <div className="topbar-spacer" />
           <div className="acct">
             {local ? (
@@ -266,7 +254,7 @@ export default function App() {
                 onChange={(e) => {
                   const i = Number(e.target.value);
                   setS(devSession(DEV_ACCOUNTS[i].key, dep.chainId));
-                  setTab(DEV_ACCOUNTS[i].role === 'Operator' ? 'Operator' : DEV_ACCOUNTS[i].role === 'Investor' ? 'Invest' : DEV_ACCOUNTS[i].role === 'Supplier' ? 'Sell' : 'Invoices');
+                  setTab(DEV_ACCOUNTS[i].role === 'Operator' ? 'Operator' : DEV_ACCOUNTS[i].role === 'Investor' ? 'Marketplace' : 'Invoices');
                 }}
               >
                 {DEV_ACCOUNTS.map((a, i) => (<option key={a.label} value={i}>{a.label} (local)</option>))}
@@ -325,10 +313,14 @@ export default function App() {
         {err && <p className="error">{err}</p>}
         {book && (
           <main>
-            {tab === 'Sell' && <SupplierPage dep={dep} s={s} book={book} send={send} />}
-            {tab === 'Invoices' && <DebtorPage dep={dep} s={s} book={book} send={send} />}
+            {tab === 'Invoices' && (
+              book.me.isOperator
+                ? <OperatorPage dep={dep} s={s} book={book} send={send} />
+                : book.invoices.some((invoice) => invoice.debtor.toLowerCase() === s.account.toLowerCase())
+                  ? <DebtorPage dep={dep} s={s} book={book} send={send} />
+                  : <SupplierPage dep={dep} s={s} book={book} send={send} />
+            )}
             {tab === 'Marketplace' && <InvestorPage dep={dep} s={s} book={book} send={send} />}
-            {tab === 'Invest' && <InvestorPage dep={dep} s={s} book={book} send={send} />}
             {tab === 'Permissions' && <PermissionsPage dep={dep} s={s} book={book} send={send} />}
             {tab === 'Activity' && <ActivityPage dep={dep} s={s} book={book} send={send} />}
             {tab === 'Playbook' && <PlaybookPage dep={dep} s={s} book={book} send={send} />}
