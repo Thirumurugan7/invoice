@@ -663,14 +663,17 @@ function UpcomingSettlements({ book, onSelect }: { book: Book; onSelect: (item: 
         rows.map((inv) => {
           const d = daysLeft(inv, book.chainTime);
           return (
-            <button className="list-row action-row" key={inv.id} onClick={() => onSelect(invoiceWorkflowContext(inv, book, 'Settlement readiness', `${d.toFixed(0)} days to maturity`))}>
-              <div className="who">
+            <button className="action-card settlement-action" key={inv.id} onClick={() => onSelect(invoiceWorkflowContext(inv, book, 'Settlement readiness', `${d.toFixed(0)} days to maturity`))}>
+              <div className="action-card-copy">
+                <span className="eyebrow">Settlement review</span>
                 <b>{inv.debtorName || short(inv.debtor)}</b>
                 <span className="muted">#{inv.id} {inv.ref} · due {jst(inv.maturity)}</span>
               </div>
-              <span className="amt">{yen(inv.face - inv.funded)}</span>
-              <span className={`pill-days${d <= 3 ? ' soon' : ''}`}>{d < 1 ? '<1d' : `${d.toFixed(0)}d`}</span>
-              <span className="action-arrow" aria-hidden="true">→</span>
+              <div className="action-card-meta">
+                <span className="amt">{yen(inv.face - inv.funded)}</span>
+                <span className={`pill-days${d <= 3 ? ' soon' : ''}`}>{d < 1 ? '<1d' : `${d.toFixed(0)}d`}</span>
+                <span className="ai-review-link">Review with AI <span aria-hidden="true">→</span></span>
+              </div>
             </button>
           );
         })
@@ -712,13 +715,16 @@ function DashboardActions({ book, s, onSelect }: { book: Book; s: Session; onSel
         <p className="empty-state">No actionable items right now.</p>
       ) : (
         rows.map(({ invoice, label, detail }) => (
-          <button className="list-row action-row" key={invoice.id} onClick={() => onSelect(invoiceWorkflowContext(invoice, book, label, detail))}>
-            <div className="who">
+          <button className={`action-card priority-action ${role.toLowerCase()}`} key={invoice.id} onClick={() => onSelect(invoiceWorkflowContext(invoice, book, label, detail))}>
+            <div className="action-card-copy">
+              <span className="eyebrow">{role} priority</span>
               <b>{label}</b>
               <span className="muted">#{invoice.id} {invoice.ref} · {invoice.debtorName || short(invoice.debtor)}</span>
             </div>
-            <span className="badge butter">{detail}</span>
-            <span className="action-arrow" aria-hidden="true">→</span>
+            <div className="action-card-meta">
+              <span className="action-detail">{detail}</span>
+              <span className="ai-review-link">Ask AI what’s next <span aria-hidden="true">→</span></span>
+            </div>
           </button>
         ))
       )}

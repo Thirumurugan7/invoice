@@ -321,10 +321,22 @@ td.actions { display: flex; gap: 6px; flex-wrap: wrap; }
 /* ---------------------------------------------------------------- list panels */
 .list-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; }
 .list-row + .list-row { border-top: 1px solid var(--bone); }
-.action-row { width: 100%; border-radius: 0; color: inherit; background: transparent; box-shadow: none; text-align: left; }
-.action-row:hover { padding-left: 8px; color: inherit; background: rgb(255 255 255 / 0.56); }
-.action-row:focus-visible { outline: 2px solid #3081ef; outline-offset: 2px; }
-.action-arrow { flex: none; color: var(--muted); font-size: 18px; }
+.action-card { width: 100%; min-width: 0; display: grid; gap: 14px; margin-top: 10px; padding: 16px; border: 1px solid rgb(19 19 21 / 0.06); border-radius: 14px; color: var(--foreground); background: white; box-shadow: 0 8px 20px -16px rgb(19 19 21 / 0.35); text-align: left; white-space: normal; }
+.action-card:hover { color: var(--foreground); transform: translateY(-2px); box-shadow: var(--lift); }
+.action-card:focus-visible { outline: 3px solid rgb(48 129 239 / 0.35); outline-offset: 2px; }
+.action-card-copy { min-width: 0; }
+.action-card-copy .eyebrow { display: block; margin-bottom: 5px; color: var(--subtle); font-size: 9px; }
+.action-card-copy b, .action-card-copy .muted { display: block; max-width: 100%; white-space: normal; overflow-wrap: anywhere; word-break: normal; }
+.action-card-copy b { font-size: 14px; line-height: 1.35; }
+.action-card-copy .muted { margin-top: 3px; font-size: 11px; line-height: 1.45; }
+.action-card-meta { min-width: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.action-detail { max-width: 100%; padding: 4px 9px; border-radius: var(--r-pill); color: var(--butter-ink); background: rgb(255 255 255 / 0.64); font-size: 10px; line-height: 1.35; white-space: normal; overflow-wrap: anywhere; }
+.ai-review-link { margin-left: auto; color: var(--foreground); font-size: 10px; font-weight: 700; white-space: normal; }
+.settlement-action { background: #f5dc78; }
+.priority-action.seller { background: var(--mint); }
+.priority-action.capital { background: #d7e8fb; }
+.priority-action.operations { color: white; background: #7850c7; }
+.priority-action.operations .muted, .priority-action.operations .eyebrow, .priority-action.operations .ai-review-link { color: rgb(255 255 255 / 0.82); }
 .list-row .who { flex: 1; min-width: 0; }
 .list-row .who b { display: block; font-size: 13.5px; }
 .list-row .who .muted { font-size: 12px; }
