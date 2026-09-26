@@ -696,7 +696,8 @@ function NeedsAction({ book }: { book: Book }) {
   );
 }
 
-type WorkflowReview = { nextAction: string; urgency: string; risk: string; reason: string; owner: string };
+type WorkspaceRole = 'Seller' | 'Operations' | 'Capital';
+type WorkflowReview = { nextAction: string; urgency: string; risk: string; reason: string; owner: string; actionId?: string };
 type AssistantMessage = { role: 'user' | 'assistant'; text: string; review?: WorkflowReview };
 type AgentName = 'GPT' | 'Claude' | 'Gemini';
 type AgentStatus = Record<AgentName, boolean>;
@@ -737,9 +738,77 @@ async function readAssistantAttachment(file: File) {
   return (await file.text()).slice(0, MAX_ATTACHMENT_CHARS);
 }
 
-const reviewSchema = [
+type PreparedAction = {
+  id: string;
+  role: WorkspaceRole;
+  title: string;
+  detail: string;
+  button: string;
+  address: Address;
+  abi: readonly unknown[];
+  fn: string;
+  args: unknown[];
+};
+
+function workspaceRole(book: Book, s: Session): WorkspaceRole {
+  if (book.me.isOperator) return 'Operations';
+  const mine = book.invoices.some((invoice) => invoice.supplier.toLowerCase() === s.account.toLowerCase());
+  return book.me.name || mine ? 'Seller' : 'Capital';
+}
+
+function preparedAction(dep: Deployment, s: Session, book: Book): PreparedAction | undefined {
+  const role = workspaceRole(book, s);
+  if (role === 'Operations') {
+    const overdue = book.invoices.find((invoice) => invoice.status === 2 && book.chainTime > invoice.maturity + 3 * 86400);
+    if (overdue) return {
+      id: `operations:default:${overdue.id}`, role, title: `Mark invoice #${overdue.id} as defaulted`,
+      detail: `${overdue.ref} is beyond maturity and the three-day grace period.`, button: 'Confirm default in wallet',
+      address: dep.registry, abi: ABI.registry, fn: 'markDefault', args: [BigInt(overdue.id)],
+    };
+    const review = book.invoices.find((invoice) => (invoice.status === 1 || invoice.status === 2) && !invoice.frozen);
+    if (review) return {
+      id: `operations:freeze:${review.id}`, role, title: `Place invoice #${review.id} under review`,
+      detail: `${review.ref} will stop trading until Operations unfreezes it.`, button: 'Confirm review hold in wallet',
+      address: dep.registry, abi: ABI.registry, fn: 'setFrozen', args: [BigInt(review.id), true],
+    };
+    return undefined;
+  }
+  if (role === 'Seller') {
+    const mine = book.invoices.filter((invoice) => invoice.supplier.toLowerCase() === s.account.toLowerCase());
+    const ready = mine.find((invoice) => invoice.status === 2 && !invoice.poolCreated);
+    if (ready) return {
+      id: `seller:pool:${ready.id}`, role, title: `Open funding for invoice #${ready.id}`,
+      detail: `${ready.ref} is accepted and ready for investor bids.`, button: 'Confirm pool creation in wallet',
+      address: dep.market, abi: ABI.market, fn: 'createPool', args: [BigInt(ready.id)],
+    };
+    const inventory = mine.find((invoice) => invoice.status === 2 && invoice.poolCreated && invoice.myTokens > 0n);
+    if (inventory) return {
+      id: `seller:approve:${inventory.id}`, role, title: `Approve invoice #${inventory.id} for sale`,
+      detail: `Authorize the marketplace to transfer this invoice inventory when you submit a sale.`, button: 'Confirm token approval in wallet',
+      address: inventory.token, abi: ABI.token, fn: 'approve', args: [dep.market, MAX],
+    };
+    return undefined;
+  }
+  const amount = 50_000n * 10n ** 18n;
+  if (book.me.jpycAllowanceMarket < amount) return {
+    id: 'capital:approve-market', role, title: 'Approve JPYC for marketplace investing',
+    detail: 'Authorize the marketplace before placing bids or purchasing invoice positions.', button: 'Confirm JPYC approval in wallet',
+    address: dep.jpyc, abi: ABI.jpyc, fn: 'approve', args: [dep.market, MAX],
+  };
+  const target = book.invoices.find((invoice) => invoice.poolCreated && invoice.tradable && invoice.status === 2);
+  if (!target || book.me.jpyc < amount) return undefined;
+  return {
+    id: `capital:buy:${target.id}`, role, title: `Invest ¥50,000 in invoice #${target.id}`,
+    detail: `${target.ref} is tradable; execution includes 2% price protection and a ten-minute deadline.`, button: 'Confirm investment in wallet',
+    address: dep.market, abi: ABI.market, fn: 'buy',
+    args: [BigInt(target.id), amount, (amount * 10n ** 18n * 100n) / (target.fair * 102n), deadline(book)],
+  };
+}
+
+const reviewSchema = (action?: PreparedAction) => [
   'Return only valid JSON with this exact shape:',
-  '{"nextAction":"one specific action starting with a verb","urgency":"Now|Today|This week","risk":"the single most important risk or blocker","reason":"one short evidence-based reason","owner":"the team or role that should act"}',
+  '{"nextAction":"one specific action starting with a verb","urgency":"Now|Today|This week","risk":"the single most important risk or blocker","reason":"one short evidence-based reason","owner":"the team or role that should act","actionId":"approved action id or none"}',
+  action ? `The only executable action you may propose is ${action.id}: ${action.title}. Use that exact actionId only when it supports your recommendation; otherwise use "none".` : 'No executable action is available. Use "none" for actionId.',
   'Do not claim that an action has been executed. Keep every value concise and use only the supplied data.',
 ].join('\n');
 
@@ -780,7 +849,7 @@ function portfolioSnapshot(book: Book) {
   };
 }
 
-function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: WorkflowContext; onClear: () => void }) {
+function AssistantPanel({ dep, s, book, send, selected, onClear }: Props & { selected?: WorkflowContext; onClear: () => void }) {
   const initialPlaybook = useRef(loadPlaybook());
   const [provider, setProvider] = useState<AgentName>(initialPlaybook.current.provider);
   const [draft, setDraft] = useState('');
@@ -793,22 +862,28 @@ function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: Wo
   const [attachmentError, setAttachmentError] = useState<string>();
   const panelRef = useRef<HTMLElement>(null);
   const snapshot = portfolioSnapshot(book);
+  const role = workspaceRole(book, s);
+  const action = preparedAction(dep, s, book);
   const shortcuts = [
     {
+      label: `Prepare ${role} action`,
+      prompt: `Act as the ${role} workspace assistant. Review the live portfolio and prepare the safest useful next action for human approval.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema(action)}`,
+    },
+    {
       label: 'Portfolio review',
-      prompt: `Review this invoice portfolio. Prioritize the one issue that requires attention first.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema}`,
+      prompt: `Review this invoice portfolio. Prioritize the one issue that requires attention first.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema(action)}`,
     },
     {
       label: 'Funding recommendation',
-      prompt: `Review the open invoices and identify the single best action to improve funding. Consider maturity, funded amount, buyer grade, pricing band, tradability, and pool availability.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema}`,
+      prompt: `Review the open invoices and identify the single best action to improve funding. Consider maturity, funded amount, buyer grade, pricing band, tradability, and pool availability.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema(action)}`,
     },
     {
       label: 'Settlement monitor',
-      prompt: `Review settlement readiness across the invoices. Prioritize overdue or near-maturity exposure and recommend one action.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema}`,
+      prompt: `Review settlement readiness across the invoices. Prioritize overdue or near-maturity exposure and recommend one action.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema(action)}`,
     },
     {
       label: 'Permission check',
-      prompt: `Review the account eligibility, collateral coverage, frozen invoices, and tradability flags. Recommend one compliance or permission action.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema}`,
+      prompt: `Review the account eligibility, collateral coverage, frozen invoices, and tradability flags. Recommend one compliance or permission action.\n\nPortfolio data:\n${JSON.stringify(snapshot, null, 2)}\n\n${reviewSchema(action)}`,
     },
   ];
 
@@ -866,6 +941,7 @@ function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: Wo
               risk: String(parsed.risk),
               reason: String(parsed.reason),
               owner: String(parsed.owner || 'Finance operations'),
+              actionId: parsed.actionId && parsed.actionId !== 'none' ? String(parsed.actionId) : undefined,
             };
           }
         } catch {
@@ -966,6 +1042,13 @@ function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: Wo
                     <div><span>Why this action</span><p>{message.review.reason}</p></div>
                   </div>
                   <div className="next-action-owner"><span>Owner</span><b>{message.review.owner}</b></div>
+                  {message.review.actionId && action?.id === message.review.actionId && (
+                    <div className="approval-card">
+                      <div><span>Prepared transaction · {action.role}</span><b>{action.title}</b><p>{action.detail}</p></div>
+                      <button onClick={() => send(action.title, action.address, action.abi, action.fn, action.args)}>{action.button}</button>
+                    </div>
+                  )}
+                  {message.review.actionId && action?.id !== message.review.actionId && <p className="stale-action">This prepared action is no longer valid against current chain data. Ask the assistant to prepare a fresh action.</p>}
                 </div>
               ) : <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}>{message.text}</div>
             ))}
@@ -1009,7 +1092,7 @@ function AssistantPanel({ book, selected, onClear }: { book: Book; selected?: Wo
   );
 }
 
-export function PlaybookPage({ book }: Props) {
+export function PlaybookPage(props: Props) {
   return (
     <div className="playbook-page">
       <div className="playbook-title">
@@ -1019,12 +1102,12 @@ export function PlaybookPage({ book }: Props) {
         </div>
         <p className="muted">Your assistant conversations and next actions stay here when you change views or reload.</p>
       </div>
-      <AssistantPanel book={book} onClear={() => {}} />
+      <AssistantPanel {...props} onClear={() => {}} />
     </div>
   );
 }
 
-export function BookPage({ book, onViewAll }: Props) {
+export function BookPage({ dep, s, book, send, onViewAll }: Props) {
   const [mb, setMb] = useState<MbBook>();
   const [mbErr, setMbErr] = useState<string>();
   const [selectedWorkflow, setSelectedWorkflow] = useState<WorkflowContext>();
@@ -1057,7 +1140,7 @@ export function BookPage({ book, onViewAll }: Props) {
             {onViewAll && <button onClick={onViewAll}>View invoices</button>}
           </div>
         </div>
-        <AssistantPanel book={book} selected={selectedWorkflow} onClear={() => setSelectedWorkflow(undefined)} />
+        <AssistantPanel dep={dep} s={s} book={book} send={send} selected={selectedWorkflow} onClear={() => setSelectedWorkflow(undefined)} />
       </div>
       {mb && (
         <div className="grid">

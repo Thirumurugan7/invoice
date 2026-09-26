@@ -420,6 +420,13 @@ td.actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .next-action-owner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 18px 16px; }
 .next-action-owner span { margin: 0; }
 .next-action-owner b { font-size: 12px; }
+.approval-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 18px; margin: 0 18px 18px; padding: 14px; border: 1px solid rgb(29 91 73 / 0.2); border-radius: 14px; background: var(--mint); }
+.approval-card span, .approval-card b, .approval-card p { display: block; }
+.approval-card span { color: var(--mint-ink); font-size: 10px; font-weight: 750; text-transform: uppercase; }
+.approval-card b { margin: 3px 0; font-size: 13px; }
+.approval-card p { margin: 0; color: var(--muted); font-size: 11px; }
+.approval-card button { white-space: nowrap; }
+.stale-action { margin: 0 18px 18px; padding: 10px 12px; border-radius: 10px; color: var(--caution); background: var(--butter); font-size: 11px; }
 .loading-message { color: var(--muted); animation: assistant-pulse 1.2s ease-in-out infinite; }
 @keyframes assistant-pulse { 50% { opacity: 0.55; } }
 .assistant-composer { margin: 0 16px 16px; padding: 12px; border-radius: 18px; background: white; box-shadow: var(--lift); }
