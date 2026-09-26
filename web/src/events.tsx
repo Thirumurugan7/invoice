@@ -221,6 +221,12 @@ export function EventsPage({ chainId }: { chainId: number }) {
         </div>
       </section>
 
+      {chainId !== 11155111 && (
+        <p className="banner pending">
+          You are on the local demo chain. MultiBaas indexes the Sepolia deployment only, so trades you make locally do not appear here.
+        </p>
+      )}
+
       <section className="grid events-overview">
         <div className="card">
           <div className="panel-title"><h3>Events by contract</h3><span className="muted small-text">MultiBaas alias</span></div>
