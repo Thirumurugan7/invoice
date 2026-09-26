@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { isAddress, keccak256, parseUnits, toBytes, type Address } from 'viem';
+import { isAddress, parseUnits, type Address } from 'viem';
 import { ABI, sha256File, type Deployment, type Session } from './chain';
 import { jst, price, short, yen } from './errors';
 import { fetchBookFromMultiBaas, multibaasEnabled, type MbBook } from './multibaas';
@@ -29,6 +29,19 @@ function Badge({ inv }: { inv: InvoiceRow }) {
   return <span className={`badge ${cls}`}>{STATUS[inv.status]}</span>;
 }
 
+function CompanyName({ dep, book, send }: Props) {
+  const [name, setName] = useState('');
+  return (
+    <div className="company-name-control">
+      <p className="muted">{book.me.name ? `Company: ${book.me.name}` : 'Add a unique display name for on-chain invoice records.'}</p>
+      <div className="row">
+        <F label="Company name" value={name} set={setName} ph={book.me.name || '株式会社…'} />
+        <button className="ghost" disabled={!name.trim()} onClick={() => send('Set company name', dep.registry, ABI.registry, 'setCompanyName', [name.trim()])}>Save name</button>
+      </div>
+    </div>
+  );
+}
+
 export function SupplierPage({ dep, s, book, send }: Props) {
   const [debtor, setDebtor] = useState('');
   const [face, setFace] = useState('500000');
@@ -39,10 +52,9 @@ export function SupplierPage({ dep, s, book, send }: Props) {
   const [documentError, setDocumentError] = useState<string>();
   const mine = book.invoices.filter((i) => i.supplier.toLowerCase() === s.account.toLowerCase() || i.myTokens > 0n);
   const registered = mine.find((invoice) => invoice.ref === ref);
-  const duplicate = book.invoices.some((invoice) => invoice.ref === ref && invoice.supplier.toLowerCase() !== s.account.toLowerCase());
-  const validFace = Number(face) > 0;
-  const validDays = Number.isInteger(Number(days)) && Number(days) >= 7;
-  const ready = Boolean(docHash && ref.trim() && isAddress(debtor) && validFace && validDays && book.me.verified && !duplicate && !registered);
+  const validFace = Number(face) > 0 && Number(face) <= 1_000_000_000_000;
+  const validDays = Number.isInteger(Number(days)) && Number(days) >= 1;
+  const ready = Boolean(docHash && ref.trim() && isAddress(debtor) && debtor.toLowerCase() !== s.account.toLowerCase() && validFace && validDays && !registered);
   const prefillFromDocument = (text: string) => {
     const reference = text.match(/(?:invoice|reference|invoice\s*(?:number|no\.?|#))\s*[:#-]?\s*([A-Z0-9][A-Z0-9/_-]{3,})/i)?.[1];
     const wallet = text.match(/0x[a-fA-F0-9]{40}/)?.[0];
@@ -60,7 +72,7 @@ export function SupplierPage({ dep, s, book, send }: Props) {
     <div className="grid">
       <section className="card invoice-intake">
         <h3>Upload invoice for liquidity</h3>
-        <p className="muted">{book.me.verified ? `Permission policy active for ${book.me.name}` : 'Company approval is required before an invoice can be registered on-chain.'}</p>
+        <CompanyName dep={dep} s={s} book={book} send={send} />
         <label className="field">
           <span>Invoice PDF</span>
           <input
@@ -90,9 +102,9 @@ export function SupplierPage({ dep, s, book, send }: Props) {
         <F label="Buyer company wallet" value={debtor} set={setDebtor} ph="0x… approved company" />
         <F label="Face value (JPYC)" value={face} set={setFace} />
         <F label="Days to maturity" value={days} set={setDays} />
-        {!book.me.verified && <p className="form-warning">Your company is still under review.</p>}
-        {duplicate && <p className="form-warning">This invoice reference is already registered by another supplier.</p>}
-        {!validDays && <p className="form-warning">Maturity must be at least 7 days from registration.</p>}
+        {isAddress(debtor) && debtor.toLowerCase() === s.account.toLowerCase() && <p className="form-warning">Supplier and buyer must use different wallets.</p>}
+        {!validFace && <p className="form-warning">Face value must be above zero and no more than ¥1 trillion.</p>}
+        {!validDays && <p className="form-warning">Maturity must be at least 1 day from registration.</p>}
         <button
           disabled={!ready}
           onClick={() => send('Register invoice on-chain', dep.registry, ABI.registry, 'registerInvoice', [
@@ -133,7 +145,7 @@ function SellCard({ inv, dep, book, send, s }: { inv: InvoiceRow; dep: Deploymen
       </p>
       <InvoiceRecord inv={inv} s={s} />
       <p>Available to sell {yen(inv.myTokens)} face value</p>
-      <p className="muted">Buyer grade G{inv.debtorGrade} · pricing rate {pct(inv.rateBps)} (at upload {pct(inv.rateAtIssueBps)})</p>
+      <p className="muted">Buyer grade G{inv.debtorGrade}{inv.debtorRated ? '' : ' (unrated)'} · pricing rate {pct(inv.rateBps)} (at upload {pct(inv.rateAtIssueBps)})</p>
       {inv.status === 2 && inv.poolCreated && (
         <>
           <F label="Sell face amount" value={amt} set={setAmt} />
@@ -179,11 +191,11 @@ export function DebtorPage({ dep, s, book, send }: Props) {
   const mine = book.invoices.filter((i) => i.debtor.toLowerCase() === s.account.toLowerCase());
   const [amt, setAmt] = useState('20000');
   const m = book.me;
-  const weak = m.grade >= 4;
   return (
     <div className="grid">
       <section className="card">
         <h3>Invoice approvals</h3>
+        <CompanyName dep={dep} s={s} book={book} send={send} />
         <p>{book.me.name || short(s.account)} · payment balance {yen(book.me.jpyc)}</p>
         <button className="ghost" onClick={() => send('Approve JPYC for payments', dep.jpyc, ABI.jpyc, 'approve', [dep.registry, MAX])}>
           Approve settlement account
@@ -192,11 +204,7 @@ export function DebtorPage({ dep, s, book, send }: Props) {
       <section className="card">
         <h3>Settlement reserve</h3>
         <p className="muted">
-          {m.grade === 0
-            ? 'Not rated yet.'
-            : weak
-              ? `Grade G${m.grade}: additional reserve required before new invoices can enter the marketplace.`
-              : `Grade G${m.grade}: optional reserve can improve investor pricing by reducing settlement risk.`}
+          {m.rated ? `Grade G${m.grade}` : 'Unrated'} · acceptance requires {(m.requiredBps / 100).toFixed(0)}% collateral. Locked collateral earns {pct(book.aprBps)} APR while backing accepted invoices.
         </p>
         <p>
           Outstanding {yen(m.outstanding)} · reserved <b>{yen(m.collateral)}</b> · required {yen(m.collateralRequired)} · coverage {(m.coverageBps / 100).toFixed(0)}%
@@ -210,6 +218,8 @@ export function DebtorPage({ dep, s, book, send }: Props) {
           <button className="ghost" onClick={() => send(`Withdraw ${amt} JPYC collateral`, dep.vault, ABI.vault, 'withdraw', [u(amt)])}>Release reserve</button>
         </div>
         <p className="muted small-text">If settlement fails, reserved funds are routed to invoice holders automatically.</p>
+        <p className="muted small-text">Locked {yen(m.locked)} · earning interest {yen(m.stake)} · accrued {yen(m.interest)}</p>
+        <button disabled={m.interest === 0n || book.rewardReserve === 0n} onClick={() => send('Claim collateral interest', dep.vault, ABI.vault, 'claimInterest', [])}>Claim interest</button>
       </section>
       {mine.length === 0 && <p className="muted">No invoices addressed to you.</p>}
       {mine.map((inv) => (
@@ -223,10 +233,11 @@ export function DebtorPage({ dep, s, book, send }: Props) {
           </p>
           {inv.status === 1 && (
             <div className="row">
-              <button onClick={() => send('Accept (発生記録)', dep.registry, ABI.registry, 'acceptInvoice', [BigInt(inv.id)])}>Approve invoice</button>
+              <button disabled={m.collateral < inv.acceptNeed} onClick={() => send('Accept (発生記録)', dep.registry, ABI.registry, 'acceptInvoice', [BigInt(inv.id)])}>Approve invoice</button>
               <button className="danger" onClick={() => send('Reject', dep.registry, ABI.registry, 'rejectInvoice', [BigInt(inv.id), 'disputed'])}>
                 Reject
               </button>
+              {m.collateral < inv.acceptNeed && <span className="form-warning">Reserve {yen(inv.acceptNeed - m.collateral)} more before approval.</span>}
             </div>
           )}
           {inv.status === 2 && (
@@ -246,11 +257,6 @@ export function InvestorPage({ dep, s, book, send }: Props) {
   const [offset, setOffset] = useState('0');
   return (
     <div>
-      {s.kind !== 'readonly' && !book.me.canHold && (
-        <div className="banner error">
-          This wallet is still under review. Investor approval is required before it can place bids or hold invoice positions.
-        </div>
-      )}
       <p className="muted">
         Available funds {yen(book.me.jpyc)} · bid band ±{String(book.bandBps)} bps ·{' '}
         <button className="ghost small" onClick={() => send('Approve JPYC for market', dep.jpyc, ABI.jpyc, 'approve', [dep.market, MAX])}>
@@ -345,37 +351,16 @@ export function InvestorPage({ dep, s, book, send }: Props) {
 
 // ---------------------------------------------------------------- Operator
 export function OperatorPage({ dep, book, send }: Props) {
-  const [who, setWho] = useState('');
-  const [corp, setCorp] = useState('');
-  const [name, setName] = useState('');
   const [id, setId] = useState('1');
   const [debtor, setDebtor] = useState('');
   const [grade, setGrade] = useState('2');
   const [base, setBase] = useState('');
-  const [inv, setInv] = useState('');
+  const [apr, setApr] = useState('');
+  const [fund, setFund] = useState('100000');
+  const [reqGrade, setReqGrade] = useState('0');
+  const [reqBps, setReqBps] = useState('');
   return (
     <div className="grid">
-      <section className="card">
-        <h3>Company permission policy</h3>
-        <p className="muted">
-          {book.me.isOperator ? 'Operator access active.' : 'You are not an operator.'} Production approvals can be delegated through a secure cloud signing policy.
-        </p>
-        <F label="Company wallet" value={who} set={setWho} ph="0x…" />
-        <F label="法人番号 (corporate number)" value={corp} set={setCorp} ph="1010001000001" />
-        <F label="Company name" value={name} set={setName} />
-        <button disabled={!isAddress(who) || !corp} onClick={() => send('Verify company', dep.registry, ABI.registry, 'verifyCompany', [who, keccak256(toBytes(`corp:${corp}`)), name])}>
-          Approve company
-        </button>
-      </section>
-      <section className="card">
-        <h3>Investor permissions</h3>
-        <p className="muted">Only approved investors, companies, and venues can hold invoice positions.</p>
-        <F label="Investor wallet" value={inv} set={setInv} ph="0x…" />
-        <div className="row">
-          <button disabled={!isAddress(inv)} onClick={() => send('Approve investor', dep.registry, ABI.registry, 'approveInvestor', [inv, true])}>Approve</button>
-          <button className="ghost" disabled={!isAddress(inv)} onClick={() => send('Revoke investor', dep.registry, ABI.registry, 'approveInvestor', [inv, false])}>Revoke</button>
-        </div>
-      </section>
       <section className="card">
         <h3>Buyer credit rating</h3>
         <p className="muted">
@@ -393,6 +378,17 @@ export function OperatorPage({ dep, book, send }: Props) {
         <button className="ghost" disabled={!base} onClick={() => send('Set base rate', dep.risk, ABI.risk, 'setBaseRate', [Number(base)])}>Set base rate</button>
       </section>
       <section className="card">
+        <h3>Collateral policy and rewards</h3>
+        <p className="muted">Unrated wallets use grade 0. Requirements are enforced when the buyer accepts, never when the supplier registers.</p>
+        <label className="field"><span>Risk band</span><select value={reqGrade} onChange={(event) => setReqGrade(event.target.value)}><option value="0">Unrated</option>{[1,2,3,4,5].map((g) => <option key={g} value={g}>G{g}</option>)}</select></label>
+        <F label="Required collateral (bps)" value={reqBps} set={setReqBps} ph={String(book.requiredByGrade[Number(reqGrade)])} />
+        <button className="ghost" disabled={reqBps === ''} onClick={() => send('Set collateral requirement', dep.vault, ABI.vault, 'setRequiredBps', [Number(reqGrade), Number(reqBps)])}>Set requirement</button>
+        <F label="Collateral APR (bps)" value={apr} set={setApr} ph={String(book.aprBps)} />
+        <button className="ghost" disabled={!apr} onClick={() => send('Set collateral APR', dep.vault, ABI.vault, 'setAprBps', [Number(apr)])}>Set APR</button>
+        <F label="Reward reserve amount" value={fund} set={setFund} />
+        <div className="row"><button onClick={() => send('Fund collateral rewards', dep.vault, ABI.vault, 'fundRewards', [u(fund)])}>Fund rewards</button><button className="ghost" onClick={() => send('Withdraw unused rewards', dep.vault, ABI.vault, 'withdrawRewards', [u(fund)])}>Withdraw rewards</button></div>
+      </section>
+      <section className="card">
         <h3>Invoice review controls</h3>
         <F label="Invoice id" value={id} set={setId} />
         <div className="row">
@@ -406,16 +402,16 @@ export function OperatorPage({ dep, book, send }: Props) {
 
 export function PermissionsPage({ s, book }: Props) {
   const policy = [
-    { label: 'Company KYB', value: book.me.verified ? 'Approved' : 'Under review', tone: book.me.verified ? 'mint' : 'butter' },
-    { label: 'Investor access', value: book.me.approvedInvestor ? 'Approved' : 'Under review', tone: book.me.approvedInvestor ? 'mint' : 'butter' },
+    { label: 'Market access', value: 'Open', tone: 'mint' },
+    { label: 'Credit rating', value: book.me.rated ? `G${book.me.grade}` : 'Unrated', tone: book.me.rated ? 'mint' : 'butter' },
     { label: 'Delegated signing', value: book.me.isOperator ? 'Operator enabled' : 'Policy controlled', tone: book.me.isOperator ? 'ink' : 'lilac' },
-    { label: 'Invoice custody', value: book.me.canHold ? 'Allowed' : 'Restricted', tone: book.me.canHold ? 'mint' : 'butter' },
+    { label: 'Collateral requirement', value: pct(book.me.requiredBps), tone: book.me.requiredBps > 0 ? 'butter' : 'mint' },
   ];
   return (
     <div className="grid">
       <section className="hero permissions-hero">
         <span className="tag">Wallet & permissions</span>
-        <span className="figure">{book.me.canHold ? 'Ready' : 'Review'}</span>
+        <span className="figure">Ready</span>
         <span className="muted small-text">Permission policy for {book.me.name || short(s.account)}</span>
         <div className="hero-foot">
           <span className="mono small-text">{short(s.account)}</span>
@@ -742,10 +738,15 @@ function portfolioSnapshot(book: Book) {
     baseRate: pct(book.baseRateBps),
     account: {
       name: book.me.name,
-      verified: book.me.verified,
-      approvedInvestor: book.me.approvedInvestor,
+      rated: book.me.rated,
+      grade: book.me.grade,
       collateral: yen(book.me.collateral),
       collateralRequired: yen(book.me.collateralRequired),
+      collateralLocked: yen(book.me.locked),
+      collateralEarning: yen(book.me.stake),
+      collateralInterest: yen(book.me.interest),
+      collateralApr: pct(book.aprBps),
+      rewardReserve: yen(book.rewardReserve),
       coverage: pct(book.me.coverageBps),
     },
     invoices: book.invoices.map((invoice) => ({
