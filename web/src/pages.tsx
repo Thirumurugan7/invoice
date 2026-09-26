@@ -471,7 +471,9 @@ const workflowPrompt = (item: WorkflowContext) => [
   `Funded: ${item.funded}`,
   `Due date: ${item.dueDate}`,
   '',
-  'Identify the most important risk or blocker, recommend the single next best action, and give a short reason. Keep the answer practical for a finance operator.',
+  'Return only valid JSON with this exact shape:',
+  '{"nextAction":"one specific action starting with a verb","urgency":"Now|Today|This week","risk":"the single most important risk or blocker","reason":"one short evidence-based reason","owner":"the team or role that should act"}',
+  'Keep every value concise and practical for a finance operator. Do not include markdown or additional keys.',
 ].join('\n');
 
 function MaturityBoard({ book, selected, onSelect }: { book: Book; selected?: WorkflowContext; onSelect: (item: WorkflowContext) => void }) {
@@ -664,7 +666,8 @@ function NeedsAction({ book }: { book: Book }) {
   );
 }
 
-type AssistantMessage = { role: 'user' | 'assistant'; text: string };
+type WorkflowReview = { nextAction: string; urgency: string; risk: string; reason: string; owner: string };
+type AssistantMessage = { role: 'user' | 'assistant'; text: string; review?: WorkflowReview };
 type AgentName = 'GPT' | 'Claude' | 'Gemini';
 type AgentStatus = Record<AgentName, boolean>;
 
@@ -695,7 +698,10 @@ function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onC
       setMessages((current) => [...current, { role: 'assistant', text: `${provider} is not connected on this machine yet.` }]);
       return;
     }
-    setMessages((current) => [...current, { role: 'user', text: clean }]);
+    setMessages((current) => [...current, {
+      role: 'user',
+      text: workflow ? `Review invoice #${workflow.invoiceId} and recommend the next best action.` : clean,
+    }]);
     setDraft('');
     setLoading(true);
     try {
@@ -711,7 +717,25 @@ function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onC
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'The assistant could not respond.');
-      setMessages((current) => [...current, { role: 'assistant', text: result.reply }]);
+      let review: WorkflowReview | undefined;
+      if (workflow) {
+        try {
+          const json = String(result.reply).match(/\{[\s\S]*\}/)?.[0];
+          const parsed = json ? JSON.parse(json) : undefined;
+          if (parsed?.nextAction && parsed?.risk && parsed?.reason) {
+            review = {
+              nextAction: String(parsed.nextAction),
+              urgency: String(parsed.urgency || 'Today'),
+              risk: String(parsed.risk),
+              reason: String(parsed.reason),
+              owner: String(parsed.owner || 'Finance operations'),
+            };
+          }
+        } catch {
+          review = undefined;
+        }
+      }
+      setMessages((current) => [...current, { role: 'assistant', text: review ? '' : result.reply, review }]);
       setAttachment(undefined);
       if (workflow) onClear();
     } catch (error: any) {
@@ -789,7 +813,17 @@ function AssistantPanel({ selected, onClear }: { selected?: WorkflowContext; onC
         ) : (
           <div className="assistant-messages">
             {messages.map((message, index) => (
-              <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}>{message.text}</div>
+              message.review ? (
+                <div className="next-action-card" key={`${message.role}-${index}`}>
+                  <div className="next-action-topline"><span>Next best action</span><b>{message.review.urgency}</b></div>
+                  <h3>{message.review.nextAction}</h3>
+                  <div className="next-action-details">
+                    <div><span>Primary risk</span><p>{message.review.risk}</p></div>
+                    <div><span>Why this action</span><p>{message.review.reason}</p></div>
+                  </div>
+                  <div className="next-action-owner"><span>Owner</span><b>{message.review.owner}</b></div>
+                </div>
+              ) : <div className={`assistant-message ${message.role}`} key={`${message.role}-${index}`}>{message.text}</div>
             ))}
             {loading && <div className="assistant-message assistant loading-message">{provider} is working…</div>}
           </div>
