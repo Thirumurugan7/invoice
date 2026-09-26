@@ -6,7 +6,7 @@ import { fetchBookFromMultiBaas, multibaasEnabled, type MbBook } from './multiba
 import { STATUS, type Book, type InvoiceRow } from './state';
 
 type Send = (label: string, address: Address, abi: readonly unknown[], fn: string, args: unknown[]) => Promise<void>;
-type Props = { dep: Deployment; s: Session; book: Book; send: Send; onViewAll?: () => void };
+type Props = { dep: Deployment; s: Session; book: Book; send: Send; onViewAll?: () => void; isConsumer?: boolean };
 const MAX = 2n ** 255n;
 const u = (v: string) => parseUnits(v || '0', 18);
 const daysLeft = (inv: InvoiceRow, now: number) => Math.max(0, (inv.maturity - now) / 86400);
@@ -42,7 +42,7 @@ function CompanyName({ dep, book, send }: Props) {
   );
 }
 
-export function SupplierPage({ dep, s, book, send }: Props) {
+export function SupplierPage({ dep, s, book, send, isConsumer }: Props) {
   const [debtor, setDebtor] = useState('');
   const [face, setFace] = useState('500000');
   const [days, setDays] = useState('60');
@@ -126,15 +126,41 @@ export function SupplierPage({ dep, s, book, send }: Props) {
         </div>
       </section>
       {mine.map((inv) => (
-        <SellCard key={inv.id} inv={inv} dep={dep} book={book} send={send} s={s} />
+        <SellCard key={inv.id} inv={inv} dep={dep} book={book} send={send} s={s} isConsumer={isConsumer} />
       ))}
     </div>
   );
 }
 
-function SellCard({ inv, dep, book, send, s }: { inv: InvoiceRow; dep: Deployment; book: Book; send: Send; s: Session }) {
+/// Consumer Finance sells into the same investor market as any supplier — same `market.sell`, same investor bids
+/// and approval — but capped to what their World ID Selfie Check score unlocks, not the full face value. A regular
+/// seller account is unaffected: full face value, no World ID involved.
+function useWorldCap({ gated, s, myTokens }: { gated: boolean; s: Session; myTokens: bigint }) {
+  const [verification, setVerification] = useState<{ score: number } | null>();
+  const [configured, setConfigured] = useState(true);
+  useEffect(() => {
+    if (!gated) return;
+    let live = true;
+    fetch(`/api/world/status?address=${s.account}`, { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((result) => {
+        if (!live) return;
+        setConfigured(Boolean(result.configured));
+        setVerification(result.verification ?? null);
+      })
+      .catch(() => live && setConfigured(false));
+    return () => { live = false; };
+  }, [gated, s.account]);
+  if (!gated || !configured) return { gated: false, verified: true, scorePercent: 100, cap: myTokens };
+  const scorePercent = verification ? Math.max(0, Math.min(100, verification.score <= 10 ? verification.score * 10 : verification.score)) : 0;
+  return { gated: true, verified: Boolean(verification), scorePercent, cap: (myTokens * BigInt(scorePercent)) / 100n };
+}
+
+function SellCard({ inv, dep, book, send, s, isConsumer }: { inv: InvoiceRow; dep: Deployment; book: Book; send: Send; s: Session; isConsumer?: boolean }) {
   const [amt, setAmt] = useState('100000');
   const fairValue = (u(amt) * inv.fair) / 10n ** 18n;
+  const worldCap = useWorldCap({ gated: Boolean(isConsumer), s, myTokens: inv.myTokens });
+  const overCap = worldCap.gated && u(amt) > worldCap.cap;
   return (
     <section className="card">
       <h3>
@@ -145,16 +171,24 @@ function SellCard({ inv, dep, book, send, s }: { inv: InvoiceRow; dep: Deploymen
       </p>
       <InvoiceRecord inv={inv} s={s} />
       <p>Available to sell {yen(inv.myTokens)} face value</p>
+      {worldCap.gated && inv.status === 2 && inv.poolCreated && inv.myTokens > 0n && (
+        <p className="muted small-text">
+          {worldCap.verified
+            ? `Your World ID Selfie Check score unlocks ${worldCap.scorePercent}% of this invoice now (${yen(worldCap.cap)} of ${yen(inv.myTokens)}); the rest releases when ${inv.debtorName || 'the buyer'} pays.`
+            : 'Verify with World ID on the Consumer Finance dashboard to unlock early access to this invoice.'}
+        </p>
+      )}
       <p className="muted">Buyer grade G{inv.debtorGrade}{inv.debtorRated ? '' : ' (unrated)'} · pricing rate {pct(inv.rateBps)} (at upload {pct(inv.rateAtIssueBps)})</p>
-      {inv.status === 2 && inv.poolCreated && (
+      {inv.status === 2 && inv.poolCreated && (worldCap.verified || !worldCap.gated) && (
         <>
           <F label="Sell face amount" value={amt} set={setAmt} />
           <p className="muted">
             Indicative liquidity: <b>{yen(fairValue)}</b> (price {price(inv.fair)}) · minimum proceeds set to 98%
           </p>
+          {overCap && <p className="form-warning">That's above the {yen(worldCap.cap)} your Selfie Check score unlocks right now.</p>}
           <div className="row">
             <button className="ghost" onClick={() => send('Approve invoice token', inv.token, ABI.token, 'approve', [dep.market, MAX])}>Approve</button>
-            <button onClick={() => send(`Sell invoice #${inv.id} for early cash`, dep.market, ABI.market, 'sell', [BigInt(inv.id), u(amt), (fairValue * 98n) / 100n, deadline(book)])}>
+            <button disabled={overCap} onClick={() => send(`Sell invoice #${inv.id} for early cash`, dep.market, ABI.market, 'sell', [BigInt(inv.id), u(amt), (fairValue * 98n) / 100n, deadline(book)])}>
               Get paid early
             </button>
           </div>

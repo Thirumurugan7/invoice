@@ -6,4 +6,5 @@ web/node_modules/
 web/dist/
 multibaas/node_modules/
 web/.env.local
+web/.data/
 .DS_Store
