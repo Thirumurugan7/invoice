@@ -48,14 +48,15 @@ export function baseContract(label: string, contract: string) {
 
 /// ABI versions in the MultiBaas library. Bump a label's version whenever its ABI changes: MultiBaas keeps the first
 /// ABI registered under a (label, version), so re-registering with the same version silently keeps the old one.
-///   registry 4.0 = + collateral (outstandingOf, CollateralRequired) · risk 3.0 = + vault · market 3.0 = + NotEligible
+///   registry 5.0 = open access (no KYB/KYC, setCompanyName) · risk 4.0 = + gradeFor (unrated = G5)
+///   vault 3.0 = + collateral interest (APR, reward pool) · market 4.0 / token 4.0 = no holder checks
 export const VERSIONS: Record<string, string> = {
-  tegata_invoice_registry: '4.0',
-  tegata_credit_risk: '3.0',
-  tegata_collateral_vault: '2.0',
+  tegata_invoice_registry: '5.0',
+  tegata_credit_risk: '4.0',
+  tegata_collateral_vault: '3.0',
   tegata_curve_hook: '2.0',
-  tegata_market: '3.0',
-  tegata_invoice_token: '3.0',
+  tegata_market: '4.0',
+  tegata_invoice_token: '4.0',
   uniswap_v4_pool_manager: '1.0',
 };
 export const versionOf = (label: string) => VERSIONS[label] ?? '1.0';

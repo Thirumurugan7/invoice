@@ -48,15 +48,10 @@ contract TegataMarketTest is Test {
         market = new TegataMarket(manager, registry, IHooks(address(hook)), jpyc);
 
         vm.startPrank(operator);
-        registry.verifyCompany(supplier, keccak256("corp:1"), "Sakura Seiko");
-        registry.verifyCompany(debtor, keccak256("corp:2"), "Tokyo Motors");
         risk.setRegistry(address(registry));
         risk.setVault(address(vault));
         vault.setRegistry(address(registry));
         risk.rate(debtor, 2); // 3%
-        registry.setVenue(address(manager), true);
-        registry.approveInvestor(investor, true);
-        registry.approveInvestor(buyer, true);
         vm.stopPrank();
         vm.prank(supplier);
         id = registry.registerInvoice(debtor, 1_000_000e18, uint64(block.timestamp + 90 days), keccak256("pdf"), "");
