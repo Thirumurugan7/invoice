@@ -476,11 +476,21 @@ const workflowPrompt = (item: WorkflowContext) => [
 
 function MaturityBoard({ book, selected, onSelect }: { book: Book; selected?: WorkflowContext; onSelect: (item: WorkflowContext) => void }) {
   const [showAll, setShowAll] = useState(false);
+  const [filter, setFilter] = useState<'open' | 'pending' | 'funded' | 'review'>('open');
+  const [anchorDate, setAnchorDate] = useState(() => new Date(book.chainTime * 1000).toISOString().slice(0, 10));
   const open = book.invoices.filter((i) => i.status === 1 || i.status === 2);
-  const focus = [...open].sort((a, b) => a.maturity - b.maturity)[0];
-  const columnCount = showAll ? 30 : CALENDAR_DAYS;
-  const todayIndex = 7;
-  const startTime = book.chainTime - todayIndex * 86400;
+  const visibleInvoices = open
+    .filter((invoice) => filter === 'open'
+      || (filter === 'pending' && invoice.status === 1)
+      || (filter === 'funded' && invoice.status === 2 && invoice.funded > 0n)
+      || (filter === 'review' && invoice.frozen))
+    .sort((a, b) => a.maturity - b.maturity);
+  const anchorTime = Math.floor(new Date(`${anchorDate}T00:00:00+09:00`).getTime() / 1000);
+  const latestDue = visibleInvoices.reduce((latest, invoice) => Math.max(latest, invoice.maturity), anchorTime);
+  const expandedDays = Math.min(90, Math.max(30, Math.ceil((latestDue - anchorTime) / 86400) + 9));
+  const columnCount = showAll ? expandedDays : CALENDAR_DAYS;
+  const startTime = anchorTime - 7 * 86400;
+  const todayIndex = Math.round((book.chainTime - startTime) / 86400);
   const calendar = Array.from({ length: columnCount }, (_, index) => {
     const timestamp = startTime + index * 86400;
     const date = new Date(timestamp * 1000);
@@ -491,26 +501,35 @@ function MaturityBoard({ book, selected, onSelect }: { book: Book; selected?: Wo
       weekend: ['Sat', 'Sun'].includes(date.toLocaleDateString('en-US', { timeZone: 'Asia/Tokyo', weekday: 'short' })),
     };
   });
-  const dueIndex = focus ? Math.min(columnCount - 1, Math.max(0, Math.round((focus.maturity - startTime) / 86400))) : todayIndex + 5;
-  const lanes = focus ? [
-    { key: 'registered', name: focus.supplierName || short(focus.supplier), meta: `Invoice #${focus.id}`, initial: 'I', start: 0, end: 4, tone: 'purple', label: 'Invoice registered', status: 'Verified' },
-    { key: 'buyer', name: focus.debtorName || short(focus.debtor), meta: `Buyer · G${focus.debtorGrade}`, initial: 'B', start: 3, end: 7, tone: 'blue', label: 'Buyer review', status: focus.status === 1 ? 'Pending' : 'Accepted' },
-    { key: 'bids', name: 'Investor marketplace', meta: `${pct(Number(book.bandBps))} pricing band`, initial: 'M', start: 5, end: 11, tone: 'green', label: 'Investor bids', status: 'Open' },
-    { key: 'liquidity', name: 'Liquidity desk', meta: `${yen(focus.face)} face value`, initial: 'L', start: 8, end: 14, tone: 'purple', label: 'Funding window', status: focus.funded > 0n ? 'Funded' : 'Ready' },
-    { key: 'settlement', name: 'Settlement account', meta: `Due ${jst(focus.maturity).split(' ')[0]}`, initial: 'S', start: Math.max(0, dueIndex - 3), end: Math.min(columnCount - 1, dueIndex + 2), tone: 'green', label: 'Settlement', status: dueIndex <= todayIndex + 2 ? 'Due soon' : 'Scheduled' },
-  ] : [];
+  const lanes = visibleInvoices.map((invoice) => {
+    const dueIndex = Math.round((invoice.maturity - startTime) / 86400);
+    const funding = invoice.face > 0n ? Number((invoice.funded * 100n) / invoice.face) : 0;
+    const isOverdue = invoice.maturity < book.chainTime;
+    return {
+      key: `invoice-${invoice.id}`,
+      invoice,
+      name: invoice.debtorName || short(invoice.debtor),
+      meta: `#${invoice.id} · ${yen(invoice.face)}`,
+      initial: String(invoice.id),
+      start: Math.max(0, Math.min(columnCount - 1, todayIndex)),
+      end: Math.max(0, Math.min(columnCount - 1, Math.max(todayIndex, dueIndex))),
+      tone: invoice.frozen ? 'purple' : invoice.status === 1 ? 'blue' : 'green',
+      label: invoice.frozen ? 'Under review' : invoice.status === 1 ? 'Awaiting buyer approval' : funding > 0 ? `${funding}% funded` : 'Open for investor bids',
+      status: isOverdue ? 'Overdue' : `${Math.max(0, Math.ceil((invoice.maturity - book.chainTime) / 86400))}d to due`,
+    };
+  });
   const contextFor = (lane: typeof lanes[number]): WorkflowContext => ({
     key: lane.key,
-    invoiceId: String(focus?.id ?? ''),
-    reference: focus?.ref || 'No reference',
+    invoiceId: String(lane.invoice.id),
+    reference: lane.invoice.ref || 'No reference',
     stage: lane.label,
     status: lane.status,
-    supplier: focus?.supplierName || (focus ? short(focus.supplier) : ''),
-    buyer: focus?.debtorName || (focus ? short(focus.debtor) : ''),
-    buyerGrade: `Grade ${focus?.debtorGrade ?? 'unrated'}`,
-    faceValue: focus ? yen(focus.face) : '',
-    funded: focus ? yen(focus.funded) : '',
-    dueDate: focus ? jst(focus.maturity) : '',
+    supplier: lane.invoice.supplierName || short(lane.invoice.supplier),
+    buyer: lane.invoice.debtorName || short(lane.invoice.debtor),
+    buyerGrade: `Grade ${lane.invoice.debtorGrade}`,
+    faceValue: yen(lane.invoice.face),
+    funded: yen(lane.invoice.funded),
+    dueDate: jst(lane.invoice.maturity),
   });
 
   return (
@@ -518,20 +537,31 @@ function MaturityBoard({ book, selected, onSelect }: { book: Book; selected?: Wo
       <div className="schedule-panel-head">
         <div>
           <h2>Invoice liquidity calendar</h2>
-          <span>Workflow stages</span>
+          <span>Live open invoices</span>
         </div>
         <div className="schedule-controls">
-          <button className="ghost">{jst(book.chainTime).split(' ')[0]}</button>
-          <button className="ghost">Filter</button>
+          <input
+            className="calendar-date"
+            type="date"
+            aria-label="Calendar start date"
+            value={anchorDate}
+            onChange={(event) => setAnchorDate(event.target.value)}
+          />
+          <select className="calendar-filter" aria-label="Filter calendar invoices" value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}>
+            <option value="open">All open</option>
+            <option value="pending">Pending approval</option>
+            <option value="funded">Funded</option>
+            <option value="review">Under review</option>
+          </select>
           <button className="ghost" onClick={() => setShowAll((value) => !value)}>{showAll ? 'Compact view' : 'View all'}</button>
         </div>
       </div>
-      {open.length === 0 ? (
-        <p className="empty-state">No open invoices on the books right now.</p>
+      {visibleInvoices.length === 0 ? (
+        <p className="empty-state">No invoices match this calendar filter.</p>
       ) : (
         <div className="schedule-scroll" aria-label="Invoice liquidity calendar">
           <div className="schedule" style={{ ['--calendar-days' as any]: columnCount }}>
-            <div className="schedule-corner">Workflow</div>
+            <div className="schedule-corner">Invoices</div>
             <div className="schedule-dates">
               {calendar.map((date) => (
                 <div className={`${date.weekend ? 'weekend ' : ''}${date.index === todayIndex ? 'today' : ''}`} key={date.index}>
@@ -575,7 +605,7 @@ function MaturityBoard({ book, selected, onSelect }: { book: Book; selected?: Wo
                   </div>
                 </div>
             ))}
-            <div className="today-line" style={{ left: 195 + todayIndex * 49 + 22 }} />
+            {todayIndex >= 0 && todayIndex < columnCount && <div className="today-line" style={{ left: 195 + todayIndex * 49 + 22 }} />}
           </div>
         </div>
       )}
