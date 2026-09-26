@@ -11,19 +11,24 @@ import {CollateralVault} from "./CollateralVault.sol";
 
 /// @title InvoiceRegistry — tokenized receivables settled in JPYC (a digital replacement for paper 手形)
 /// @notice Lifecycle (open access: no KYB/KYC, any wallet can take part):
-///   1. Companies may set a self-declared display name (`setCompanyName`); it is not verified.
+///   1. Companies may set a display name (`setCompanyName`). Names are unique (no two wallets can hold the same
+///      exact name) but self-declared: only the operator's credit rating says anything about who a debtor is.
 ///   2. Any supplier registers an invoice against any debtor. The discount rate is not the supplier's choice: the
 ///      fair-value curve uses the debtor's live rate from CreditRiskModel (rating + payment history). A debtor the
 ///      operator has not rated is priced as the weakest grade (G5), so a downgrade or default reprices all of that
-///      debtor's invoices. The invoice document hash can be registered only once, so the same receivable cannot be
-///      financed twice (二重譲渡).
+///      debtor's invoices. A document can be registered only once per supplier and debtor, so the same receivable
+///      cannot be financed twice (二重譲渡); a rejected invoice frees its document for re-registration.
 ///   3. The debtor accepts (like でんさい 発生記録): face-value tokens are minted to the supplier. Now it is an
-///      acknowledged, tradable claim priced on a discount curve that accretes to face at maturity.
+///      acknowledged, tradable claim priced on a discount curve that accretes to face at maturity. Unrated debtors
+///      (and any grade the operator sets a requirement for) must first lock collateral covering that share of
+///      everything they will owe (CollateralVault.required); registration itself is never blocked.
 ///   4. The debtor pays JPYC into escrow (early or at maturity). Fully paid => Settled; holders redeem 1:1.
 ///   5. Not fully paid by maturity + grace => anyone can mark Defaulted; holders redeem pro-rata (recovery).
 ///   Redemption pays JPYC first, then burns the tokens.
-///   Collateral: optional by default (the operator can require a share per grade). It lowers the debtor's rate,
-///   earns interest (operator-set APR, paid from a funded reward pool), and on default is seized into the payout.
+///   Collateral backing accepted invoices is locked until they are paid; it lowers the debtor's rate, earns interest
+///   (operator-set APR, paid from a funded reward pool), and on default is seized into the payout.
+///   Outstanding = accepted, unpaid face only: pending invoices from strangers can't move a debtor's rate or
+///   collateral requirement.
 ///   Invoice tokens are freely transferable.
 ///   Invoice details (reference number, parties, terms, live price) are on-chain: `invoiceMetadata(id)` renders
 ///   JSON, served by each token's `contractURI()` (ERC-7572).
@@ -36,6 +41,7 @@ contract InvoiceRegistry is AccessControl {
     uint256 public constant MIN_TENOR = 1 days;
     uint256 public constant TRADING_CUTOFF = 1 days; // trading closes 1 day before maturity (holder set fixed)
     uint256 public constant GRACE = 3 days;
+    uint256 public constant MAX_FACE = 1e12 * 1e18; // ¥1 trillion per invoice
 
     enum Status {
         None,
@@ -67,10 +73,11 @@ contract InvoiceRegistry is AccessControl {
     uint256 public invoiceCount;
     mapping(uint256 => Invoice) internal _invoices;
     mapping(address => uint256) public idOfToken;
-    mapping(bytes32 => uint256) public idOfDocHash;
-    mapping(address => string) public companyName; // self-declared by the company (unverified)
+    mapping(bytes32 => uint256) public idOfDoc; // docKey(docHash, supplier, debtor) -> live invoice id
+    mapping(address => string) public companyName; // set by the company itself; unique, not verified
+    mapping(bytes32 => address) public nameHolder; // keccak256(name) -> wallet using it
     mapping(uint256 => string) public invoiceRef; // the supplier's invoice number, e.g. SKR-2026-0926-001
-    mapping(address => uint256) public outstandingOf; // unpaid face of the debtor's pending + accepted invoices
+    mapping(address => uint256) public outstandingOf; // unpaid face of the debtor's ACCEPTED invoices
 
     event CompanyNamed(address indexed company, string name);
     event InvoiceRegistered(
@@ -95,6 +102,7 @@ contract InvoiceRegistry is AccessControl {
     error CollateralRequired(address debtor, uint256 required, uint256 posted);
     error InvalidTerms();
     error DuplicateInvoice(uint256 existingId);
+    error NameTaken(address holder);
     error NotDebtor();
     error BadStatus(Status status);
     error NotYetDefaultable(uint256 at);
@@ -111,8 +119,30 @@ contract InvoiceRegistry is AccessControl {
     // ---------------------------------------------------------------- companies (self-service)
     /// @notice Set the caller's display name (shown on invoices and in their on-chain metadata). Self-declared.
     function setCompanyName(string calldata name) external {
-        companyName[msg.sender] = name;
-        emit CompanyNamed(msg.sender, name);
+        _setName(msg.sender, name);
+    }
+
+    /// @notice Operator takedown of an abusive or impersonating name (frees it for its rightful owner).
+    function clearCompanyName(address company) external onlyRole(OPERATOR_ROLE) {
+        _setName(company, "");
+    }
+
+    function _setName(address company, string memory name) internal {
+        bytes32 h = keccak256(bytes(name));
+        if (bytes(name).length != 0) {
+            address holder = nameHolder[h];
+            if (holder != address(0) && holder != company) revert NameTaken(holder);
+        }
+        string memory old = companyName[company];
+        if (bytes(old).length != 0) delete nameHolder[keccak256(bytes(old))];
+        if (bytes(name).length != 0) nameHolder[h] = company;
+        companyName[company] = name;
+        emit CompanyNamed(company, name);
+    }
+
+    /// @notice Duplicate-financing key: one live invoice per document, supplier and debtor.
+    function docKey(bytes32 docHash, address supplier, address debtor) public pure returns (bytes32) {
+        return keccak256(abi.encode(docHash, supplier, debtor));
     }
 
     // ---------------------------------------------------------------- operator
@@ -126,13 +156,14 @@ contract InvoiceRegistry is AccessControl {
         external
         returns (uint256 id)
     {
-        if (face == 0 || debtor == address(0) || debtor == msg.sender || maturity < block.timestamp + MIN_TENOR) {
+        if (
+            face == 0 || face > MAX_FACE || debtor == address(0) || debtor == msg.sender
+                || maturity < block.timestamp + MIN_TENOR
+        ) {
             revert InvalidTerms();
         }
-        if (idOfDocHash[docHash] != 0) revert DuplicateInvoice(idOfDocHash[docHash]);
-        uint256 need = vault.required(debtor, face);
-        if (vault.collateralOf(debtor) < need) revert CollateralRequired(debtor, need, vault.collateralOf(debtor));
-        outstandingOf[debtor] += face;
+        bytes32 key = docKey(docHash, msg.sender, debtor);
+        if (idOfDoc[key] != 0) revert DuplicateInvoice(idOfDoc[key]);
         uint32 rateNow = risk.rateBps(debtor);
 
         id = ++invoiceCount;
@@ -155,7 +186,7 @@ contract InvoiceRegistry is AccessControl {
             docHash: docHash
         });
         idOfToken[address(token)] = id;
-        idOfDocHash[docHash] = id;
+        idOfDoc[key] = id;
         emit InvoiceRegistered(id, msg.sender, debtor, address(token), face, maturity, rateNow, docHash);
         emit InvoiceMetadata(id, r, companyName[msg.sender], companyName[debtor]);
     }
@@ -164,7 +195,12 @@ contract InvoiceRegistry is AccessControl {
         Invoice storage inv = _invoices[id];
         if (msg.sender != inv.debtor) revert NotDebtor();
         if (inv.status != Status.Pending) revert BadStatus(inv.status);
+        uint256 need = vault.required(msg.sender, inv.face);
+        uint256 posted = vault.collateralOf(msg.sender);
+        if (posted < need) revert CollateralRequired(msg.sender, need, posted);
         inv.status = Status.Accepted;
+        outstandingOf[msg.sender] += inv.face;
+        vault.sync(msg.sender);
         inv.token.mint(inv.supplier, inv.face);
         emit InvoiceAccepted(id, msg.sender, address(inv.token), inv.face);
     }
@@ -174,7 +210,7 @@ contract InvoiceRegistry is AccessControl {
         if (msg.sender != inv.debtor) revert NotDebtor();
         if (inv.status != Status.Pending) revert BadStatus(inv.status);
         inv.status = Status.Rejected;
-        outstandingOf[inv.debtor] -= inv.face;
+        delete idOfDoc[docKey(inv.docHash, inv.supplier, inv.debtor)]; // a corrected invoice can be registered again
         emit InvoiceRejected(id, msg.sender, reason);
     }
 
@@ -187,6 +223,7 @@ contract InvoiceRegistry is AccessControl {
         jpyc.safeTransferFrom(msg.sender, address(this), amount);
         inv.funded += amount;
         outstandingOf[inv.debtor] -= amount;
+        vault.sync(inv.debtor);
         emit InvoicePaid(id, msg.sender, amount, inv.funded);
         if (inv.funded == inv.face) {
             inv.status = Status.Settled;
@@ -206,6 +243,7 @@ contract InvoiceRegistry is AccessControl {
         uint256 seized = vault.seize(inv.debtor, id, shortfall);
         inv.funded += seized;
         outstandingOf[inv.debtor] -= shortfall;
+        vault.sync(inv.debtor);
         risk.record(inv.debtor, CreditRiskModel.CreditEvent.Default, id);
         emit InvoiceDefaulted(id, inv.funded, inv.face);
     }

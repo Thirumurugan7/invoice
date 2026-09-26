@@ -23,8 +23,8 @@ import {TegataMarket} from "../src/periphery/TegataMarket.sol";
 /// Optional demo data: SUPPLIER_PK, DEBTOR_PK, INVESTOR_PK. With MockJPYC the wallets are minted yen; with real JPYC
 /// they must already hold it (official Sepolia faucet 0x5Fe7943a7823f6837756e9F0f259cd93494cc5D5, sendToken).
 /// Collateral interest: COLLATERAL_APR_BPS (default 300 = 3%) and REWARD_FUND (default ¥200,000 JPYC from the deployer,
-/// skipped if the deployer holds less). Mandatory collateral for G4–G5 (and unrated) debtors: COLLATERAL_REQUIRED_BPS
-/// (default 0 = collateral optional; risk is priced through the G5 rate instead).
+/// skipped if the deployer holds less). Collateral a debtor must lock to ACCEPT an invoice: UNRATED_COLLATERAL_BPS for
+/// debtors the operator hasn't rated (default 2000 = 20%), COLLATERAL_REQUIRED_BPS for rated G4–G5 (default 0).
 /// Local only: EXTRA_FUND_ADDRS (comma-separated) get MockJPYC for testing new, unrated companies in the UI.
 contract Deploy is Script {
     address constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
@@ -64,6 +64,7 @@ contract Deploy is Script {
         d.vault.setRegistry(address(d.registry));
         // Interest on locked collateral, paid from a reward pool funded by the deployer.
         d.vault.setAprBps(uint32(vm.envOr("COLLATERAL_APR_BPS", uint256(300))));
+        d.vault.setRequiredBps(0, uint32(vm.envOr("UNRATED_COLLATERAL_BPS", uint256(2_000))));
         uint32 requiredBps = uint32(vm.envOr("COLLATERAL_REQUIRED_BPS", uint256(0)));
         d.vault.setRequiredBps(4, requiredBps);
         d.vault.setRequiredBps(5, requiredBps);

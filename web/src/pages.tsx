@@ -14,6 +14,10 @@ const deadline = (book: Book) => BigInt(book.chainTime + 600); // 10 min
 const pct = (bps: number) => `${(bps / 100).toFixed(2)}%`;
 const impliedYield = (p: bigint, days: number) => (days <= 0 || p === 0n ? 0 : ((1e18 / Number(p) - 1) * 365) / days) * 100;
 const gradeLabel = (grade: number, rated: boolean) => (rated ? `G${grade}` : `G${grade} (unrated)`);
+/// Company names are self-declared: only an operator rating says anything about who a company is.
+const company = (name: string, addr: string, rated: boolean) => `${name || short(addr)}${rated ? ' ✓ rated' : ' · unverified'}`;
+const GRADES = [0, 1, 2, 3, 4, 5];
+const gradeName = (g: number) => (g === 0 ? 'Unrated' : `G${g}`);
 
 /// Self-declared company name (not verified): shown on invoices and in their on-chain record.
 function CompanyName({ dep, s, book, send }: Props) {
@@ -21,7 +25,7 @@ function CompanyName({ dep, s, book, send }: Props) {
   return (
     <>
       <p className="muted">
-        {book.me.name ? `Company: ${book.me.name} (self-declared)` : `No company name set for ${short(s.account)}.`}
+        {book.me.name ? `Company: ${book.me.name} (self-declared, unique)` : `No company name set for ${short(s.account)}.`}
       </p>
       <div className="row">
         <F label="Company name" value={name} set={setName} ph={book.me.name || '株式会社… (shown on your invoices)'} />
@@ -82,10 +86,10 @@ export function SupplierPage({ dep, s, book, send }: Props) {
         <F label="Days to maturity" value={days} set={setDays} />
         <p className="muted">
           Discount rate: not yours to choose. The curve uses the debtor's live credit rate (operator rating + on-chain payment history). A debtor the
-          operator hasn't rated is priced as the weakest grade, G5.{' '}
-          {book.requiredByGrade[5] > 0
-            ? `The operator currently requires G4–G5 and unrated debtors to lock ${book.requiredByGrade[5] / 100}% collateral before they can be invoiced.`
-            : 'No collateral is required: you can invoice any company.'}
+          operator hasn't rated is priced as the weakest grade, G5. You can always register an invoice;{' '}
+          {book.requiredByGrade[0] > 0
+            ? `an unrated debtor must lock ${book.requiredByGrade[0] / 100}% collateral before it can accept.`
+            : 'no collateral is needed for the debtor to accept.'}
         </p>
         <button
           disabled={!isAddress(debtor)}
@@ -118,7 +122,7 @@ function SellCard({ inv, dep, book, send, s }: { inv: InvoiceRow; dep: Deploymen
         Invoice #{inv.id} <span className="mono muted">{inv.ref}</span> <Badge inv={inv} />
       </h3>
       <p className="muted">
-        {inv.debtorName || short(inv.debtor)} · face {yen(inv.face)} · due {jst(inv.maturity)}
+        {company(inv.debtorName, inv.debtor, inv.debtorRated)} · face {yen(inv.face)} · due {jst(inv.maturity)}
       </p>
       <InvoiceRecord inv={inv} s={s} />
       <p>You hold {yen(inv.myTokens)} face in tokens</p>
@@ -186,19 +190,20 @@ export function DebtorPage({ dep, s, book, send }: Props) {
       <section className="card">
         <h3>Collateral (担保)</h3>
         <p className="muted">
-          {m.requiredBps > 0
-            ? `${m.rated ? `Grade G${m.grade}: weak credit` : `Unrated: priced as G${m.grade} until the operator rates you`} — you must lock ${share}% of everything you owe before a supplier can invoice you.`
-            : `${m.rated ? `Grade G${m.grade}` : `Unrated: priced as G${m.grade} until the operator rates you`} — collateral is optional.`}{' '}
-          Locked JPYC lowers your rate by up to 2% (at 100% coverage) and earns {pct(book.aprBps)} APR.
+          {m.rated ? `Grade G${m.grade}` : `Unrated: priced as G${m.grade} until the operator rates you`} —{' '}
+          {m.requiredBps > 0 ? `to accept an invoice you must hold collateral covering ${share}% of everything you will owe.` : 'collateral is optional.'} Collateral
+          backing your accepted invoices stays locked until they are paid, lowers your rate by up to 2% (at 100% coverage) and earns {pct(book.aprBps)} APR.
         </p>
         <p>
-          Outstanding {yen(m.outstanding)} · locked <b>{yen(m.collateral)}</b> · required {yen(m.collateralRequired)} · coverage {(m.coverageBps / 100).toFixed(0)}%
+          Owed (accepted) {yen(m.outstanding)} · deposited <b>{yen(m.collateral)}</b> · locked {yen(m.locked)} · free {yen(m.collateral - m.locked)} · coverage{' '}
+          {(m.coverageBps / 100).toFixed(0)}%
         </p>
         {m.requiredBps > 0 && (
           <div className="row">
             <F label="Next invoice face (JPYC)" value={preview} set={setPreview} />
             <p className="muted">
-              To be invoiced {yen(u(preview))}, lock at least <b>{yen(m.collateralRequired + previewNeed)}</b> in total ({share}% of {yen(m.outstanding + u(preview))} owed).
+              To accept an invoice of {yen(u(preview))}, hold at least <b>{yen(m.collateralRequired + previewNeed)}</b> in total ({share}% of {yen(m.outstanding + u(preview))}{' '}
+              owed).
             </p>
           </div>
         )}
@@ -215,9 +220,12 @@ export function DebtorPage({ dep, s, book, send }: Props) {
       <section className="card">
         <h3>Collateral interest</h3>
         <p>
-          Earning <b>{pct(book.aprBps)}</b> APR on {yen(m.collateral)} · accrued <b>{yen(m.interest)}</b>
+          Earning <b>{pct(book.aprBps)}</b> APR on {yen(m.stake)} · accrued <b>{yen(m.interest)}</b>
         </p>
-        <p className="muted">Paid in JPYC from the platform's reward pool ({yen(book.rewardReserve)} left). If the pool runs short you get what it holds; the rest stays claimable.</p>
+        <p className="muted">
+          Only collateral that backs your accepted, unpaid invoices earns interest. Paid in JPYC from the platform's reward pool ({yen(book.rewardReserve)} left); if the
+          pool runs short you get what it holds and the rest stays claimable.
+        </p>
         <button disabled={m.interest === 0n || book.rewardReserve === 0n} onClick={() => send('Claim collateral interest', dep.vault, ABI.vault, 'claimInterest', [])}>
           Claim {yen(m.interest < book.rewardReserve ? m.interest : book.rewardReserve)}
         </button>
@@ -228,13 +236,20 @@ export function DebtorPage({ dep, s, book, send }: Props) {
           <h3>
             Invoice #{inv.id} <span className="mono muted">{inv.ref}</span> <Badge inv={inv} />
           </h3>
-          <p className="muted">from {inv.supplierName || short(inv.supplier)} · due {jst(inv.maturity)}</p>
+          <p className="muted">from {company(inv.supplierName, inv.supplier, inv.supplierRated)} · due {jst(inv.maturity)}</p>
           <p>
             Face {yen(inv.face)} · paid {yen(inv.funded)}
           </p>
+          {inv.status === 1 && inv.acceptNeed > m.collateral && (
+            <p className="muted">
+              To accept, hold {yen(inv.acceptNeed)} of collateral: lock <b>{yen(inv.acceptNeed - m.collateral)}</b> more above.
+            </p>
+          )}
           {inv.status === 1 && (
             <div className="row">
-              <button onClick={() => send('Accept (発生記録)', dep.registry, ABI.registry, 'acceptInvoice', [BigInt(inv.id)])}>Accept</button>
+              <button disabled={inv.acceptNeed > m.collateral} onClick={() => send('Accept (発生記録)', dep.registry, ABI.registry, 'acceptInvoice', [BigInt(inv.id)])}>
+                Accept
+              </button>
               <button className="danger" onClick={() => send('Reject', dep.registry, ABI.registry, 'rejectInvoice', [BigInt(inv.id), 'disputed'])}>
                 Reject
               </button>
@@ -294,7 +309,7 @@ export function InvestorPage({ dep, s, book, send }: Props) {
                 <td>
                   {inv.id} <div className="mono muted small-text">{inv.ref}</div>
                 </td>
-                <td>{inv.debtorName || short(inv.debtor)}</td>
+                <td>{company(inv.debtorName, inv.debtor, inv.debtorRated)}</td>
                 <td>{yen(inv.face)}</td>
                 <td>{open ? d.toFixed(1) : '—'}</td>
                 <td title={`rate at registration ${pct(inv.rateAtIssueBps)}`}>
@@ -367,7 +382,7 @@ export function OperatorPage({ dep, book, send }: Props) {
   const [base, setBase] = useState('');
   const [apr, setApr] = useState('');
   const [fund, setFund] = useState('100000');
-  const [reqGrade, setReqGrade] = useState('5');
+  const [reqGrade, setReqGrade] = useState('0');
   const [reqBps, setReqBps] = useState('');
   return (
     <div className="grid">
@@ -409,18 +424,17 @@ export function OperatorPage({ dep, book, send }: Props) {
       <section className="card">
         <h3>Collateral requirement</h3>
         <p className="muted">
-          Mandatory collateral by grade, as a share of everything the debtor owes (unrated = G5):{' '}
-          {[1, 2, 3, 4, 5].map((g) => `G${g} ${book.requiredByGrade[g] / 100}%`).join(' · ')}. At 0% collateral is optional and nobody can block a supplier from
-          invoicing; above 0% the debtor must lock it before a new invoice can be registered against it.
+          Collateral a debtor must hold to ACCEPT an invoice, as a share of everything it will owe:{' '}
+          {GRADES.map((g) => `${gradeName(g)} ${book.requiredByGrade[g] / 100}%`).join(' · ')}. Registration is never blocked. At 0% collateral is optional.
         </p>
         <label className="field">
           <span>Grade</span>
           <select value={reqGrade} onChange={(e) => setReqGrade(e.target.value)}>
-            {[1, 2, 3, 4, 5].map((g) => (<option key={g} value={g}>G{g}</option>))}
+            {GRADES.map((g) => (<option key={g} value={g}>{gradeName(g)}</option>))}
           </select>
         </label>
         <F label="Required (bps of outstanding, 0 = optional)" value={reqBps} set={setReqBps} ph={String(book.requiredByGrade[Number(reqGrade)])} />
-        <button className="ghost" disabled={reqBps === ''} onClick={() => send(`Require ${reqBps} bps collateral for G${reqGrade}`, dep.vault, ABI.vault, 'setRequiredBps', [Number(reqGrade), Number(reqBps)])}>
+        <button className="ghost" disabled={reqBps === ''} onClick={() => send(`Require ${reqBps} bps collateral for ${gradeName(Number(reqGrade))}`, dep.vault, ABI.vault, 'setRequiredBps', [Number(reqGrade), Number(reqBps)])}>
           Set requirement
         </button>
       </section>
