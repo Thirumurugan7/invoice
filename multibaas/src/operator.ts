@@ -3,16 +3,14 @@
 //   Mode B (default, no HSM): MultiBaas builds the unsigned tx, the operator key (OPERATOR_PK) signs it locally,
 //          MultiBaas submits it (ChainsApi.submitSignedTransaction). The key never goes to MultiBaas.
 //
-//   npm run operator -- verify <address> <法人番号> "<company name>"
 //   npm run operator -- freeze <invoiceId> <true|false>
 //   npm run operator -- default <invoiceId>
 //   npm run operator -- rate <debtor> <grade 1..5>      (CreditRiskModel: reprices all the debtor's invoices)
 //   npm run operator -- base <bps>                      (CreditRiskModel base rate)
-//   npm run operator -- approve-investor <addr> [false] (investor KYC: may hold invoice tokens)
-//   npm run operator -- venue <addr> [false]            (contract allowed to custody invoice tokens)
+//   npm run operator -- apr <bps>                       (CollateralVault: APR paid on locked collateral, max 2000)
+//   npm run operator -- require <grade 1..5> <bps>      (CollateralVault: mandatory collateral for a grade; 0 = optional)
 //   npm run operator -- wallets
 import * as MultiBaas from '@curvegrid/multibaas-sdk';
-import { createHash } from 'node:crypto';
 import { privateKeyToAccount } from 'viem/accounts';
 import { config, LABELS } from './client.ts';
 
@@ -24,8 +22,23 @@ const hsmAddress = process.env.MB_HSM_ADDRESS;
 const operatorPk = process.env.OPERATOR_PK as `0x${string}` | undefined;
 const [cmd, ...args] = process.argv.slice(2);
 
-/// Deterministic hash of the corporate number so the raw 法人番号 never goes on-chain.
-const corpIdHash = (corpNumber: string) => '0x' + createHash('sha256').update(`corp:${corpNumber.trim()}`).digest('hex');
+/// Wait until MultiBaas sees the transaction mined, and fail loudly if it reverted. Waiting also means the next
+/// command is built on the updated nonce and state (back-to-back commands otherwise race the pending transaction).
+async function waitMined(hash: string) {
+  for (let i = 0; i < 60; i++) {
+    const receipt = await chains
+      .getTransactionReceipt(hash)
+      .then((r) => r.data.result.data)
+      .catch((e) => (e?.response?.status === 404 ? undefined : Promise.reject(e)));
+    if (receipt) {
+      if (BigInt(receipt.status) !== 1n) throw new Error(`transaction ${hash} reverted`);
+      console.log(`  mined: ${hash}`);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  throw new Error(`transaction ${hash} not mined after 3 minutes`);
+}
 
 async function send(method: string, fnArgs: unknown[], alias: string = LABELS.registry) {
   if (hsmAddress) {
@@ -35,7 +48,9 @@ async function send(method: string, fnArgs: unknown[], alias: string = LABELS.re
       signAndSubmit: true,
       nonceManagement: true,
     });
-    console.log(`${method}: signed by Cloud Wallet ${hsmAddress}`, JSON.stringify((res.data.result as any)?.tx?.hash ?? res.data.result));
+    const hash = (res.data.result as any)?.tx?.hash;
+    console.log(`${method}: signed by Cloud Wallet ${hsmAddress}`, JSON.stringify(hash ?? res.data.result));
+    if (hash) await waitMined(hash);
     return;
   }
   if (!operatorPk) throw new Error('Set MB_HSM_ADDRESS (Cloud Wallet) or OPERATOR_PK (local operator key) in multibaas/.env');
@@ -60,18 +75,16 @@ async function send(method: string, fnArgs: unknown[], alias: string = LABELS.re
   });
   // 3. MultiBaas submits and tracks it.
   const sub = await chains.submitSignedTransaction({ signedTx });
-  console.log(`${method}: built by MultiBaas, signed by operator ${account.address}, submitted via MultiBaas`, JSON.stringify(sub.data.result));
+  const hash = (sub.data.result as any).tx.hash as string;
+  console.log(`${method}: built by MultiBaas, signed by operator ${account.address}, submitted via MultiBaas: ${hash}`);
+  // 4. Wait for it to be mined (MultiBaas receipt).
+  await waitMined(hash);
 }
 
 switch (cmd) {
   case 'wallets': {
     const w = await hsm.listHsmWallets();
     console.log(JSON.stringify(w.data.result, null, 2));
-    break;
-  }
-  case 'verify': {
-    const [address, corpNumber, ...name] = args;
-    await send('verifyCompany', [address, corpIdHash(corpNumber), name.join(' ')]);
     break;
   }
   case 'freeze':
@@ -83,15 +96,15 @@ switch (cmd) {
   case 'rate':
     await send('rate', [args[0], Number(args[1])], LABELS.risk);
     break;
-  case 'approve-investor':
-    await send('approveInvestor', [args[0], args[1] !== 'false']);
+  case 'apr':
+    await send('setAprBps', [Number(args[0])], LABELS.vault);
     break;
-  case 'venue':
-    await send('setVenue', [args[0], args[1] !== 'false']);
+  case 'require':
+    await send('setRequiredBps', [Number(args[0]), Number(args[1])], LABELS.vault);
     break;
   case 'base':
     await send('setBaseRate', [Number(args[0])], LABELS.risk);
     break;
   default:
-    console.log('usage: operator wallets | verify <addr> <corpNumber> <name> | freeze <id> <true|false> | default <id> | rate <debtor> <grade> | base <bps> | approve-investor <addr> [false] | venue <addr> [false]');
+    console.log('usage: operator wallets | freeze <id> <true|false> | default <id> | rate <debtor> <grade> | base <bps> | apr <bps> | require <grade> <bps>');
 }

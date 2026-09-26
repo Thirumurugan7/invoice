@@ -139,7 +139,7 @@ export default function App() {
     const me = s.account.toLowerCase();
     if (book.me.isOperator) setTab('Operator');
     else if (book.invoices.some((i) => i.debtor.toLowerCase() === me)) setTab('Debtor');
-    else if (book.me.verified) setTab('Supplier');
+    else if (book.me.name || book.invoices.some((i) => i.supplier.toLowerCase() === me)) setTab('Supplier');
     else setTab('Investor');
   }, [book, s]);
 
@@ -228,15 +228,14 @@ export default function App() {
 
 type Send = (label: string, address: Address, abi: readonly unknown[], fn: string, args: unknown[]) => Promise<void>;
 
-/// Who this wallet is on-chain, and what it needs before it can act: gas, JPYC (official faucet), KYB.
+/// Who this wallet is on-chain, and what it needs before it can act: gas and JPYC (official faucet). No KYB/KYC:
+/// any wallet can register, accept, pay, trade and redeem.
 function WalletPanel({ dep, s, book, send }: { dep: Deployment; s: Session; book: Book; send: Send }) {
   const role = book.me.isOperator
     ? 'Operator (OPERATOR_ROLE)'
-    : book.me.verified
-      ? `KYB-verified: ${book.me.name}`
-      : book.me.approvedInvestor
-        ? 'Approved investor (KYC) — may hold invoices'
-        : 'Not approved — the operator must approve this wallet before it can hold invoices';
+    : book.me.name
+      ? `${book.me.name} (self-declared)`
+      : 'No company name set — add one on the Supplier or Debtor tab';
   const canClaim = book.me.jpyc <= 1_000_000n * 10n ** 18n;
   return (
     <section className="card wallet-panel">
@@ -263,12 +262,9 @@ function WalletPanel({ dep, s, book, send }: { dep: Deployment; s: Session; book
           Get test JPYC
         </button>
       </div>
-      {!book.me.canHold && !book.me.isOperator && (
-        <div className="muted small-text">
-          Send this address to the operator: KYB (supplier/debtor) or investor approval, in the Operator tab or <span className="mono">npm run operator</span> via MultiBaas.{' '}
-          <button className="ghost small" onClick={() => navigator.clipboard?.writeText(s.account)}>Copy address</button>
-        </div>
-      )}
+      <div className="muted small-text">
+        <button className="ghost small" onClick={() => navigator.clipboard?.writeText(s.account)}>Copy address</button>
+      </div>
       {dep && null}
     </section>
   );

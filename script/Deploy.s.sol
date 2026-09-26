@@ -22,6 +22,10 @@ import {TegataMarket} from "../src/periphery/TegataMarket.sol";
 ///   OPERATOR=<MultiBaas Cloud Wallet address> forge script script/Deploy.s.sol --rpc-url sepolia --private-key $PK --broadcast
 /// Optional demo data: SUPPLIER_PK, DEBTOR_PK, INVESTOR_PK. With MockJPYC the wallets are minted yen; with real JPYC
 /// they must already hold it (official Sepolia faucet 0x5Fe7943a7823f6837756e9F0f259cd93494cc5D5, sendToken).
+/// Collateral interest: COLLATERAL_APR_BPS (default 300 = 3%) and REWARD_FUND (default ¥200,000 JPYC from the deployer,
+/// skipped if the deployer holds less). Mandatory collateral for G4–G5 (and unrated) debtors: COLLATERAL_REQUIRED_BPS
+/// (default 0 = collateral optional; risk is priced through the G5 rate instead).
+/// Local only: EXTRA_FUND_ADDRS (comma-separated) get MockJPYC for testing new, unrated companies in the UI.
 contract Deploy is Script {
     address constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
     uint160 constant FLAGS = Hooks.BEFORE_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG;
@@ -58,8 +62,21 @@ contract Deploy is Script {
         d.risk.setRegistry(address(d.registry));
         d.risk.setVault(address(d.vault));
         d.vault.setRegistry(address(d.registry));
-        // Holder policy: the Uniswap v4 PoolManager custodies pool balances, so it must be allowed to hold invoices.
-        d.registry.setVenue(address(d.manager), true);
+        // Interest on locked collateral, paid from a reward pool funded by the deployer.
+        d.vault.setAprBps(uint32(vm.envOr("COLLATERAL_APR_BPS", uint256(300))));
+        uint32 requiredBps = uint32(vm.envOr("COLLATERAL_REQUIRED_BPS", uint256(0)));
+        d.vault.setRequiredBps(4, requiredBps);
+        d.vault.setRequiredBps(5, requiredBps);
+        uint256 fund = vm.envOr("REWARD_FUND", uint256(200_000e18));
+        if (d.mockJpyc) MockJPYC(address(d.jpyc)).mint(msg.sender, fund);
+        if (fund > 0 && d.jpyc.balanceOf(msg.sender) >= fund) {
+            d.jpyc.approve(address(d.vault), fund);
+            d.vault.fundRewards(fund);
+        }
+        if (d.mockJpyc) {
+            address[] memory extra = vm.envOr("EXTRA_FUND_ADDRS", ",", new address[](0));
+            for (uint256 i; i < extra.length; i++) MockJPYC(address(d.jpyc)).mint(extra[i], 5_000_000e18);
+        }
         if (d.operator != msg.sender) {
             d.registry.grantRole(d.registry.OPERATOR_ROLE(), d.operator);
             d.risk.grantRole(d.risk.OPERATOR_ROLE(), d.operator);
@@ -81,7 +98,8 @@ contract Deploy is Script {
         console2.log("market  ", address(d.market));
     }
 
-    /// Demo: verify + rate companies, register + accept an invoice, create its pool, post investor bids.
+    /// Demo: companies name themselves, the operator rates the debtor G2, register + accept an invoice, create its
+    /// pool, post investor bids.
     function _demo(D memory d) internal {
         uint256 sPk = vm.envOr("SUPPLIER_PK", uint256(0));
         uint256 dPk = vm.envOr("DEBTOR_PK", uint256(0));
@@ -92,10 +110,7 @@ contract Deploy is Script {
         address investor = vm.addr(iPk);
 
         vm.startBroadcast();
-        d.registry.verifyCompany(supplier, keccak256("corp:1010001000001"), unicode"株式会社さくら精工 (Sakura Seiko)");
-        d.registry.verifyCompany(debtor, keccak256("corp:2010001000002"), unicode"東京モーターズ株式会社 (Tokyo Motors)");
         d.risk.rate(debtor, 2); // grade 2: 1% base + 2% spread = 3%
-        d.registry.approveInvestor(investor, true); // investor KYC
         if (d.mockJpyc) {
             MockJPYC(address(d.jpyc)).mint(investor, 2_000_000e18);
             MockJPYC(address(d.jpyc)).mint(debtor, 5_000_000e18);
@@ -103,7 +118,12 @@ contract Deploy is Script {
         vm.stopBroadcast();
         require(d.jpyc.balanceOf(investor) >= 600_000e18, "investor needs JPYC (faucet)");
 
+        vm.startBroadcast(dPk);
+        d.registry.setCompanyName(unicode"東京モーターズ株式会社 (Tokyo Motors)");
+        vm.stopBroadcast();
+
         vm.startBroadcast(sPk);
+        d.registry.setCompanyName(unicode"株式会社さくら精工 (Sakura Seiko)");
         d.demoInvoice = d.registry.registerInvoice(
             debtor, 1_000_000e18, uint64(block.timestamp + 90 days), keccak256("demo-invoice-2026-0925-001.pdf"), "SKR-2026-0925-001"
         );

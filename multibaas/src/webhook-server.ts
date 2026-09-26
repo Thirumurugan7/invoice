@@ -29,6 +29,9 @@ function eventFields(data: any): { name: string; inputs: Record<string, unknown>
   return { name, inputs, address: data?.contract?.address ?? ev?.contract?.address };
 }
 
+/// JPYC amount (18 decimals) as yen with up to 6 decimals, so sub-yen interest doesn't print as 0.
+const jpy = (v: unknown) => (Number(BigInt(String(v)) / 10n ** 12n) / 1e6).toLocaleString('en-US', { maximumFractionDigits: 6 });
+
 async function onEvent(data: any) {
   const { name, inputs } = eventFields(data);
   switch (name) {
@@ -51,8 +54,14 @@ async function onEvent(data: any) {
     case 'InvoiceMetadata':
       console.log(`[rwa] invoice #${inputs.id} ref=${inputs.ref} ${inputs.supplierName} -> ${inputs.debtorName}`);
       break;
-    case 'InvestorApproved':
-      console.log(`[rwa] investor ${inputs.investor} ${inputs.approved ? 'approved (KYC) — may hold invoices' : 'revoked'}`);
+    case 'CompanyNamed':
+      console.log(`[rwa] ${inputs.company} calls itself "${inputs.name}" (self-declared)`);
+      break;
+    case 'InterestClaimed':
+      console.log(`[collateral] ${inputs.debtor} claimed ${jpy(inputs.amount)} JPYC interest`);
+      break;
+    case 'RewardsFunded':
+      console.log(`[collateral] reward pool funded +${jpy(inputs.amount)} JPYC (pool ${jpy(inputs.reserve)})`);
       break;
     case 'CollateralDeposited':
       console.log(`[collateral] ${inputs.debtor} locked ${Number(BigInt(String(inputs.amount)) / 10n ** 18n)} JPYC (total ${Number(BigInt(String(inputs.total)) / 10n ** 18n)})`);

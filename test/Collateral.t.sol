@@ -10,15 +10,12 @@ import {CollateralVault} from "../src/rwa/CollateralVault.sol";
 /// into the invoice payout on default.
 contract CollateralTest is TegataBase {
     address weak = makeAddr("Weak Parts KK (G5 debtor)");
-    address holder = makeAddr("approved holder");
+    address holder = makeAddr("holder");
 
     function setUp() public override {
         super.setUp();
-        vm.startPrank(operator);
-        registry.verifyCompany(weak, keccak256("corp:weak"), "Weak Parts KK");
+        vm.prank(operator);
         risk.rate(weak, 5); // 1% + 16% = 17%
-        registry.approveInvestor(holder, true);
-        vm.stopPrank();
         jpyc.mint(weak, 1_000_000e18);
         vm.prank(weak);
         jpyc.approve(address(vault), type(uint256).max);

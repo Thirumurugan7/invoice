@@ -13,6 +13,25 @@ const daysLeft = (inv: InvoiceRow, now: number) => Math.max(0, (inv.maturity - n
 const deadline = (book: Book) => BigInt(book.chainTime + 600); // 10 min
 const pct = (bps: number) => `${(bps / 100).toFixed(2)}%`;
 const impliedYield = (p: bigint, days: number) => (days <= 0 || p === 0n ? 0 : ((1e18 / Number(p) - 1) * 365) / days) * 100;
+const gradeLabel = (grade: number, rated: boolean) => (rated ? `G${grade}` : `G${grade} (unrated)`);
+
+/// Self-declared company name (not verified): shown on invoices and in their on-chain record.
+function CompanyName({ dep, s, book, send }: Props) {
+  const [name, setName] = useState('');
+  return (
+    <>
+      <p className="muted">
+        {book.me.name ? `Company: ${book.me.name} (self-declared)` : `No company name set for ${short(s.account)}.`}
+      </p>
+      <div className="row">
+        <F label="Company name" value={name} set={setName} ph={book.me.name || '株式会社… (shown on your invoices)'} />
+        <button className="ghost" disabled={!name.trim()} onClick={() => send('Set company name', dep.registry, ABI.registry, 'setCompanyName', [name.trim()])}>
+          Save name
+        </button>
+      </div>
+    </>
+  );
+}
 
 function F(p: { label: string; value: string; set: (v: string) => void; ph?: string }) {
   return (
@@ -41,7 +60,7 @@ export function SupplierPage({ dep, s, book, send }: Props) {
     <div className="grid">
       <section className="card">
         <h3>Register invoice (請求書)</h3>
-        <p className="muted">{book.me.verified ? `Verified: ${book.me.name}` : 'Not KYB-verified — ask the operator.'}</p>
+        <CompanyName dep={dep} s={s} book={book} send={send} />
         <label className="field">
           <span>Invoice PDF (hashed locally, never uploaded)</span>
           <input
@@ -58,11 +77,15 @@ export function SupplierPage({ dep, s, book, send }: Props) {
         </label>
         {docHash && <p className="muted mono">{fileName}: {short(docHash)}</p>}
         <F label="Invoice number (請求書番号)" value={ref} set={setRef} ph="SKR-2026-0926-001" />
-        <F label="Debtor address (verified company)" value={debtor} set={setDebtor} ph="0x… debtor wallet" />
+        <F label="Debtor address" value={debtor} set={setDebtor} ph="0x… debtor wallet" />
         <F label="Face value (JPYC)" value={face} set={setFace} />
         <F label="Days to maturity" value={days} set={setDays} />
         <p className="muted">
-          Discount rate: not yours to choose. The curve uses the debtor's live credit rate (operator rating + on-chain payment history).
+          Discount rate: not yours to choose. The curve uses the debtor's live credit rate (operator rating + on-chain payment history). A debtor the
+          operator hasn't rated is priced as the weakest grade, G5.{' '}
+          {book.requiredByGrade[5] > 0
+            ? `The operator currently requires G4–G5 and unrated debtors to lock ${book.requiredByGrade[5] / 100}% collateral before they can be invoiced.`
+            : 'No collateral is required: you can invoice any company.'}
         </p>
         <button
           disabled={!isAddress(debtor)}
@@ -99,7 +122,7 @@ function SellCard({ inv, dep, book, send, s }: { inv: InvoiceRow; dep: Deploymen
       </p>
       <InvoiceRecord inv={inv} s={s} />
       <p>You hold {yen(inv.myTokens)} face in tokens</p>
-      <p className="muted">Debtor grade {inv.debtorGrade} · rate {pct(inv.rateBps)} (at registration {pct(inv.rateAtIssueBps)})</p>
+      <p className="muted">Debtor grade {gradeLabel(inv.debtorGrade, inv.debtorRated)} · rate {pct(inv.rateBps)} (at registration {pct(inv.rateAtIssueBps)})</p>
       {inv.status === 2 && inv.poolCreated && (
         <>
           <F label="Sell face amount" value={amt} set={setAmt} />
@@ -146,12 +169,15 @@ function InvoiceRecord({ inv, s }: { inv: InvoiceRow; s: Session }) {
 export function DebtorPage({ dep, s, book, send }: Props) {
   const mine = book.invoices.filter((i) => i.debtor.toLowerCase() === s.account.toLowerCase());
   const [amt, setAmt] = useState('20000');
+  const [preview, setPreview] = useState('500000');
   const m = book.me;
-  const weak = m.grade >= 4;
+  const share = (m.requiredBps / 100).toFixed(0);
+  const previewNeed = (u(preview) * BigInt(m.requiredBps)) / 10_000n;
   return (
     <div className="grid">
       <section className="card">
         <h3>Debtor: {book.me.name || short(s.account)}</h3>
+        <CompanyName dep={dep} s={s} book={book} send={send} />
         <p>JPYC balance {yen(book.me.jpyc)}</p>
         <button className="ghost" onClick={() => send('Approve JPYC for payments', dep.jpyc, ABI.jpyc, 'approve', [dep.registry, MAX])}>
           Approve JPYC for payments
@@ -160,15 +186,22 @@ export function DebtorPage({ dep, s, book, send }: Props) {
       <section className="card">
         <h3>Collateral (担保)</h3>
         <p className="muted">
-          {m.grade === 0
-            ? 'Not rated yet.'
-            : weak
-              ? `Grade G${m.grade}: weak credit — you must lock 20% of what you owe before suppliers can invoice you.`
-              : `Grade G${m.grade}: collateral optional — locking JPYC lowers your rate by up to 2% (at 100% coverage).`}
+          {m.requiredBps > 0
+            ? `${m.rated ? `Grade G${m.grade}: weak credit` : `Unrated: priced as G${m.grade} until the operator rates you`} — you must lock ${share}% of everything you owe before a supplier can invoice you.`
+            : `${m.rated ? `Grade G${m.grade}` : `Unrated: priced as G${m.grade} until the operator rates you`} — collateral is optional.`}{' '}
+          Locked JPYC lowers your rate by up to 2% (at 100% coverage) and earns {pct(book.aprBps)} APR.
         </p>
         <p>
           Outstanding {yen(m.outstanding)} · locked <b>{yen(m.collateral)}</b> · required {yen(m.collateralRequired)} · coverage {(m.coverageBps / 100).toFixed(0)}%
         </p>
+        {m.requiredBps > 0 && (
+          <div className="row">
+            <F label="Next invoice face (JPYC)" value={preview} set={setPreview} />
+            <p className="muted">
+              To be invoiced {yen(u(preview))}, lock at least <b>{yen(m.collateralRequired + previewNeed)}</b> in total ({share}% of {yen(m.outstanding + u(preview))} owed).
+            </p>
+          </div>
+        )}
         <F label="Amount (JPYC)" value={amt} set={setAmt} />
         <div className="row">
           {m.jpycAllowanceVault < u(amt) && (
@@ -178,6 +211,16 @@ export function DebtorPage({ dep, s, book, send }: Props) {
           <button className="ghost" onClick={() => send(`Withdraw ${amt} JPYC collateral`, dep.vault, ABI.vault, 'withdraw', [u(amt)])}>Withdraw</button>
         </div>
         <p className="muted small-text">If an invoice defaults, locked collateral is paid to its holders automatically.</p>
+      </section>
+      <section className="card">
+        <h3>Collateral interest</h3>
+        <p>
+          Earning <b>{pct(book.aprBps)}</b> APR on {yen(m.collateral)} · accrued <b>{yen(m.interest)}</b>
+        </p>
+        <p className="muted">Paid in JPYC from the platform's reward pool ({yen(book.rewardReserve)} left). If the pool runs short you get what it holds; the rest stays claimable.</p>
+        <button disabled={m.interest === 0n || book.rewardReserve === 0n} onClick={() => send('Claim collateral interest', dep.vault, ABI.vault, 'claimInterest', [])}>
+          Claim {yen(m.interest < book.rewardReserve ? m.interest : book.rewardReserve)}
+        </button>
       </section>
       {mine.length === 0 && <p className="muted">No invoices addressed to you.</p>}
       {mine.map((inv) => (
@@ -215,12 +258,6 @@ export function InvestorPage({ dep, s, book, send }: Props) {
   const [offset, setOffset] = useState('0');
   return (
     <div>
-      {s.kind !== 'readonly' && !book.me.canHold && (
-        <div className="banner error">
-          This wallet is not approved to hold invoice tokens. Invoices are permissioned RWAs: the operator must approve your wallet (investor KYC) before you can
-          buy or post bids.
-        </div>
-      )}
       <p className="muted">
         JPYC {yen(book.me.jpyc)} · curve band ±{String(book.bandBps)} bps ·{' '}
         <button className="ghost small" onClick={() => send('Approve JPYC for market', dep.jpyc, ABI.jpyc, 'approve', [dep.market, MAX])}>
@@ -246,6 +283,12 @@ export function InvestorPage({ dep, s, book, send }: Props) {
         <tbody>
           {book.invoices.map((inv) => {
             const d = daysLeft(inv, book.chainTime);
+            // Only an accepted invoice trades on its curve. Once settled/defaulted it is worth its redemption value
+            // (1:1, or pro-rata of what was paid in), and pool price / deviation / yield no longer mean anything.
+            const open = inv.status === 1 || inv.status === 2;
+            const trading = inv.status === 2;
+            const value =
+              inv.status === 4 ? 10n ** 18n : inv.status === 5 ? (inv.funded * 10n ** 18n) / inv.face : open ? inv.fair : undefined;
             return (
               <tr key={inv.id}>
                 <td>
@@ -253,15 +296,18 @@ export function InvestorPage({ dep, s, book, send }: Props) {
                 </td>
                 <td>{inv.debtorName || short(inv.debtor)}</td>
                 <td>{yen(inv.face)}</td>
-                <td>{d.toFixed(1)}</td>
+                <td>{open ? d.toFixed(1) : '—'}</td>
                 <td title={`rate at registration ${pct(inv.rateAtIssueBps)}`}>
-                  G{inv.debtorGrade} · {pct(inv.rateBps)}
+                  {gradeLabel(inv.debtorGrade, inv.debtorRated)} · {pct(inv.rateBps)}
                   {inv.debtorCoverageBps > 0 && <div className="muted small-text">🔒 {(inv.debtorCoverageBps / 100).toFixed(0)}% collateral</div>}
                 </td>
-                <td>{price(inv.fair)}</td>
-                <td>{inv.poolPrice ? price(inv.poolPrice) : '—'}</td>
-                <td>{inv.deviationBps !== undefined ? `${inv.deviationBps} bps` : '—'}</td>
-                <td>{inv.poolPrice ? `${impliedYield(inv.poolPrice, d).toFixed(2)}%` : pct(inv.rateBps)}</td>
+                <td title={open ? 'fair value on the curve' : 'redemption value per ¥1 of face'}>
+                  {value === undefined ? '—' : price(value)}
+                  {!open && value !== undefined && <div className="muted small-text">redeem</div>}
+                </td>
+                <td>{trading && inv.poolPrice ? price(inv.poolPrice) : '—'}</td>
+                <td>{trading && inv.deviationBps !== undefined ? `${inv.deviationBps} bps` : '—'}</td>
+                <td>{!open ? '—' : trading && inv.poolPrice ? `${impliedYield(inv.poolPrice, d).toFixed(2)}%` : pct(inv.rateBps)}</td>
                 <td>
                   <Badge inv={inv} />
                 </td>
@@ -315,43 +361,22 @@ export function InvestorPage({ dep, s, book, send }: Props) {
 
 // ---------------------------------------------------------------- Operator
 export function OperatorPage({ dep, book, send }: Props) {
-  const [who, setWho] = useState('');
-  const [corp, setCorp] = useState('');
-  const [name, setName] = useState('');
   const [id, setId] = useState('1');
   const [debtor, setDebtor] = useState('');
   const [grade, setGrade] = useState('2');
   const [base, setBase] = useState('');
-  const [inv, setInv] = useState('');
+  const [apr, setApr] = useState('');
+  const [fund, setFund] = useState('100000');
+  const [reqGrade, setReqGrade] = useState('5');
+  const [reqBps, setReqBps] = useState('');
   return (
     <div className="grid">
       <section className="card">
-        <h3>KYB: verify company</h3>
-        <p className="muted">
-          {book.me.isOperator ? 'You hold OPERATOR_ROLE.' : 'You are not an operator.'} In production this key is a MultiBaas Cloud Wallet (HSM) —
-          see multibaas/src/operator.ts.
-        </p>
-        <F label="Company wallet" value={who} set={setWho} ph="0x…" />
-        <F label="法人番号 (corporate number)" value={corp} set={setCorp} ph="1010001000001" />
-        <F label="Company name" value={name} set={setName} />
-        <button disabled={!isAddress(who) || !corp} onClick={() => send('Verify company', dep.registry, ABI.registry, 'verifyCompany', [who, keccak256(toBytes(`corp:${corp}`)), name])}>
-          Verify
-        </button>
-      </section>
-      <section className="card">
-        <h3>Investor KYC: who may hold invoices</h3>
-        <p className="muted">Invoice tokens only move to KYB-verified companies, approved investors and approved venues (the Uniswap v4 PoolManager).</p>
-        <F label="Investor wallet" value={inv} set={setInv} ph="0x…" />
-        <div className="row">
-          <button disabled={!isAddress(inv)} onClick={() => send('Approve investor', dep.registry, ABI.registry, 'approveInvestor', [inv, true])}>Approve</button>
-          <button className="ghost" disabled={!isAddress(inv)} onClick={() => send('Revoke investor', dep.registry, ABI.registry, 'approveInvestor', [inv, false])}>Revoke</button>
-        </div>
-      </section>
-      <section className="card">
         <h3>Credit: rate debtor</h3>
         <p className="muted">
-          rate = base {pct(book.baseRateBps)} + grade spread (G1 1% · G2 2% · G3 4% · G4 8% · G5 16%) + 10% per default + 1% per late payment − 0.1% per
-          on-time settlement (max 1%). Re-rating reprices every open invoice of the debtor.
+          {book.me.isOperator ? 'You hold OPERATOR_ROLE.' : 'You are not an operator.'} rate = base {pct(book.baseRateBps)} + grade spread (G1 1% · G2 2% · G3 4% ·
+          G4 8% · G5 16%) + 10% per default + 1% per late payment − 0.1% per on-time settlement (max 1%) − up to 2% for collateral. Unrated debtors are priced as G5.
+          Re-rating reprices every open invoice of the debtor.
         </p>
         <F label="Debtor wallet" value={debtor} set={setDebtor} ph="0x…" />
         <label className="field">
@@ -363,6 +388,41 @@ export function OperatorPage({ dep, book, send }: Props) {
         <button disabled={!isAddress(debtor)} onClick={() => send(`Rate debtor G${grade}`, dep.risk, ABI.risk, 'rate', [debtor, Number(grade)])}>Rate</button>
         <F label="Base rate (bps)" value={base} set={setBase} ph={String(book.baseRateBps)} />
         <button className="ghost" disabled={!base} onClick={() => send('Set base rate', dep.risk, ABI.risk, 'setBaseRate', [Number(base)])}>Set base rate</button>
+      </section>
+      <section className="card">
+        <h3>Collateral interest</h3>
+        <p className="muted">
+          Debtors earn <b>{pct(book.aprBps)}</b> APR on locked collateral, paid from the reward pool: <b>{yen(book.rewardReserve)}</b>. Anyone can fund the pool; only
+          the operator sets the APR (max 20%) or withdraws unused funds.
+        </p>
+        <F label="APR (bps)" value={apr} set={setApr} ph={String(book.aprBps)} />
+        <button className="ghost" disabled={!apr} onClick={() => send(`Set collateral APR to ${apr} bps`, dep.vault, ABI.vault, 'setAprBps', [Number(apr)])}>Set APR</button>
+        <F label="Amount (JPYC)" value={fund} set={setFund} />
+        <div className="row">
+          {book.me.jpycAllowanceVault < u(fund) && (
+            <button className="ghost" onClick={() => send('Approve JPYC for the reward pool', dep.jpyc, ABI.jpyc, 'approve', [dep.vault, MAX])}>Approve</button>
+          )}
+          <button onClick={() => send(`Fund reward pool with ${fund} JPYC`, dep.vault, ABI.vault, 'fundRewards', [u(fund)])}>Fund pool</button>
+          <button className="ghost" onClick={() => send(`Withdraw ${fund} JPYC from the reward pool`, dep.vault, ABI.vault, 'withdrawRewards', [u(fund)])}>Withdraw</button>
+        </div>
+      </section>
+      <section className="card">
+        <h3>Collateral requirement</h3>
+        <p className="muted">
+          Mandatory collateral by grade, as a share of everything the debtor owes (unrated = G5):{' '}
+          {[1, 2, 3, 4, 5].map((g) => `G${g} ${book.requiredByGrade[g] / 100}%`).join(' · ')}. At 0% collateral is optional and nobody can block a supplier from
+          invoicing; above 0% the debtor must lock it before a new invoice can be registered against it.
+        </p>
+        <label className="field">
+          <span>Grade</span>
+          <select value={reqGrade} onChange={(e) => setReqGrade(e.target.value)}>
+            {[1, 2, 3, 4, 5].map((g) => (<option key={g} value={g}>G{g}</option>))}
+          </select>
+        </label>
+        <F label="Required (bps of outstanding, 0 = optional)" value={reqBps} set={setReqBps} ph={String(book.requiredByGrade[Number(reqGrade)])} />
+        <button className="ghost" disabled={reqBps === ''} onClick={() => send(`Require ${reqBps} bps collateral for G${reqGrade}`, dep.vault, ABI.vault, 'setRequiredBps', [Number(reqGrade), Number(reqBps)])}>
+          Set requirement
+        </button>
       </section>
       <section className="card">
         <h3>Freeze / unfreeze invoice</h3>

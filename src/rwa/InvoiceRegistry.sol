@@ -10,21 +10,21 @@ import {CreditRiskModel} from "./CreditRiskModel.sol";
 import {CollateralVault} from "./CollateralVault.sol";
 
 /// @title InvoiceRegistry — tokenized receivables settled in JPYC (a digital replacement for paper 手形)
-/// @notice Lifecycle:
-///   1. OPERATOR (platform; a MultiBaas Cloud Wallet / HSM key) verifies companies (KYB: hashed 法人番号).
-///   2. A verified supplier registers an invoice against a verified, RATED debtor. The discount rate is not the
-///      supplier's choice: the fair-value curve uses the debtor's live rate from CreditRiskModel (rating + payment
-///      history), so a downgrade or default reprices all of that debtor's invoices. The invoice document hash can be
-///      registered only once, so the same receivable cannot be financed twice (二重譲渡).
+/// @notice Lifecycle (open access: no KYB/KYC, any wallet can take part):
+///   1. Companies may set a self-declared display name (`setCompanyName`); it is not verified.
+///   2. Any supplier registers an invoice against any debtor. The discount rate is not the supplier's choice: the
+///      fair-value curve uses the debtor's live rate from CreditRiskModel (rating + payment history). A debtor the
+///      operator has not rated is priced as the weakest grade (G5), so a downgrade or default reprices all of that
+///      debtor's invoices. The invoice document hash can be registered only once, so the same receivable cannot be
+///      financed twice (二重譲渡).
 ///   3. The debtor accepts (like でんさい 発生記録): face-value tokens are minted to the supplier. Now it is an
 ///      acknowledged, tradable claim priced on a discount curve that accretes to face at maturity.
 ///   4. The debtor pays JPYC into escrow (early or at maturity). Fully paid => Settled; holders redeem 1:1.
 ///   5. Not fully paid by maturity + grace => anyone can mark Defaulted; holders redeem pro-rata (recovery).
 ///   Redemption pays JPYC first, then burns the tokens.
-///   Collateral: weak debtors (G4–G5) must keep JPYC in CollateralVault covering 20% of what they owe before new
-///   invoices can be registered against them; on default the collateral is seized into the invoice's payout.
-///   Holder policy (ERC-3643 style): invoice tokens can only move to KYB-verified companies, operator-approved
-///   investors, or approved venues (the Uniswap v4 PoolManager). Every transfer checks `canHold`.
+///   Collateral: optional by default (the operator can require a share per grade). It lowers the debtor's rate,
+///   earns interest (operator-set APR, paid from a funded reward pool), and on default is seized into the payout.
+///   Invoice tokens are freely transferable.
 ///   Invoice details (reference number, parties, terms, live price) are on-chain: `invoiceMetadata(id)` renders
 ///   JSON, served by each token's `contractURI()` (ERC-7572).
 contract InvoiceRegistry is AccessControl {
@@ -68,15 +68,11 @@ contract InvoiceRegistry is AccessControl {
     mapping(uint256 => Invoice) internal _invoices;
     mapping(address => uint256) public idOfToken;
     mapping(bytes32 => uint256) public idOfDocHash;
-    mapping(address => bytes32) public companyIdHash; // keccak256(法人番号) of verified companies
-    mapping(address => string) public companyName;
-    mapping(address => bool) public approvedInvestor; // operator-approved (investor KYC) holders
-    mapping(address => bool) public isVenue; // contracts allowed to hold tokens in custody (Uniswap PoolManager)
-    mapping(uint256 => string) public invoiceRef;
-    mapping(address => uint256) public outstandingOf; // unpaid face of the debtor's pending + accepted invoices // the supplier's invoice number, e.g. SKR-2026-0926-001
+    mapping(address => string) public companyName; // self-declared by the company (unverified)
+    mapping(uint256 => string) public invoiceRef; // the supplier's invoice number, e.g. SKR-2026-0926-001
+    mapping(address => uint256) public outstandingOf; // unpaid face of the debtor's pending + accepted invoices
 
-    event CompanyVerified(address indexed company, bytes32 indexed corpIdHash, string name);
-    event CompanyRevoked(address indexed company);
+    event CompanyNamed(address indexed company, string name);
     event InvoiceRegistered(
         uint256 indexed id,
         address indexed supplier,
@@ -88,8 +84,6 @@ contract InvoiceRegistry is AccessControl {
         bytes32 docHash
     );
     event InvoiceMetadata(uint256 indexed id, string ref, string supplierName, string debtorName);
-    event InvestorApproved(address indexed investor, bool approved);
-    event VenueSet(address indexed venue, bool allowed);
     event InvoiceAccepted(uint256 indexed id, address indexed debtor, address token, uint256 face);
     event InvoiceRejected(uint256 indexed id, address indexed debtor, string reason);
     event InvoiceFrozen(uint256 indexed id, bool frozen);
@@ -98,8 +92,6 @@ contract InvoiceRegistry is AccessControl {
     event InvoiceDefaulted(uint256 indexed id, uint256 funded, uint256 face);
     event Redeemed(uint256 indexed id, address indexed holder, uint256 tokens, uint256 jpycPaid);
 
-    error NotVerified(address company);
-    error NotRated(address debtor);
     error CollateralRequired(address debtor, uint256 required, uint256 posted);
     error InvalidTerms();
     error DuplicateInvoice(uint256 existingId);
@@ -116,38 +108,14 @@ contract InvoiceRegistry is AccessControl {
         _grantRole(OPERATOR_ROLE, admin);
     }
 
-    // ---------------------------------------------------------------- KYB (operator / Cloud Wallet)
-    function verifyCompany(address company, bytes32 corpIdHash, string calldata name) external onlyRole(OPERATOR_ROLE) {
-        companyIdHash[company] = corpIdHash;
-        companyName[company] = name;
-        emit CompanyVerified(company, corpIdHash, name);
+    // ---------------------------------------------------------------- companies (self-service)
+    /// @notice Set the caller's display name (shown on invoices and in their on-chain metadata). Self-declared.
+    function setCompanyName(string calldata name) external {
+        companyName[msg.sender] = name;
+        emit CompanyNamed(msg.sender, name);
     }
 
-    function revokeCompany(address company) external onlyRole(OPERATOR_ROLE) {
-        delete companyIdHash[company];
-        emit CompanyRevoked(company);
-    }
-
-    function isVerified(address company) public view returns (bool) {
-        return companyIdHash[company] != bytes32(0);
-    }
-
-    // ---------------------------------------------------------------- holder policy (operator)
-    function approveInvestor(address investor, bool approved) external onlyRole(OPERATOR_ROLE) {
-        approvedInvestor[investor] = approved;
-        emit InvestorApproved(investor, approved);
-    }
-
-    function setVenue(address venue, bool allowed) external onlyRole(OPERATOR_ROLE) {
-        isVenue[venue] = allowed;
-        emit VenueSet(venue, allowed);
-    }
-
-    /// @notice Checked by every InvoiceToken transfer: may `holder` receive invoice tokens?
-    function canHold(address holder) public view returns (bool) {
-        return isVerified(holder) || approvedInvestor[holder] || isVenue[holder];
-    }
-
+    // ---------------------------------------------------------------- operator
     function setFrozen(uint256 id, bool frozen) external onlyRole(OPERATOR_ROLE) {
         _invoices[id].frozen = frozen;
         emit InvoiceFrozen(id, frozen);
@@ -158,10 +126,7 @@ contract InvoiceRegistry is AccessControl {
         external
         returns (uint256 id)
     {
-        if (!isVerified(msg.sender)) revert NotVerified(msg.sender);
-        if (!isVerified(debtor)) revert NotVerified(debtor);
-        if (!risk.isRated(debtor)) revert NotRated(debtor);
-        if (face == 0 || debtor == msg.sender || maturity < block.timestamp + MIN_TENOR) {
+        if (face == 0 || debtor == address(0) || debtor == msg.sender || maturity < block.timestamp + MIN_TENOR) {
             revert InvalidTerms();
         }
         if (idOfDocHash[docHash] != 0) revert DuplicateInvoice(idOfDocHash[docHash]);
@@ -198,7 +163,6 @@ contract InvoiceRegistry is AccessControl {
     function acceptInvoice(uint256 id) external {
         Invoice storage inv = _invoices[id];
         if (msg.sender != inv.debtor) revert NotDebtor();
-        if (!isVerified(msg.sender)) revert NotVerified(msg.sender);
         if (inv.status != Status.Pending) revert BadStatus(inv.status);
         inv.status = Status.Accepted;
         inv.token.mint(inv.supplier, inv.face);
@@ -318,7 +282,7 @@ contract InvoiceRegistry is AccessControl {
         return "None";
     }
 
-    /// @dev Escape `"` and `\` so operator-entered names can't break the JSON.
+    /// @dev Escape `"` and `\` so self-declared names can't break the JSON.
     function _esc(string memory v) internal pure returns (string memory) {
         bytes memory b = bytes(v);
         uint256 extra;

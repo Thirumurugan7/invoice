@@ -45,14 +45,10 @@ contract ClaimsTest is Test {
         market = new TegataMarket(manager, registry, IHooks(address(hook)), jpyc);
 
         vm.startPrank(operator);
-        registry.verifyCompany(supplier, keccak256("corp:1"), "Sakura Seiko");
-        registry.verifyCompany(debtor, keccak256("corp:2"), "Tokyo Motors");
         risk.setRegistry(address(registry));
         risk.setVault(address(vault));
         vault.setRegistry(address(registry));
         risk.rate(debtor, 2); // 1% base + 2% = 3%
-        registry.setVenue(address(manager), true);
-        registry.approveInvestor(investor, true);
         vm.stopPrank();
 
         for (uint256 i; i < 3; i++) {
@@ -84,16 +80,19 @@ contract ClaimsTest is Test {
     }
 
     // ---------------------------------------------------------------- 1. why Uniswap
-    /// "Any APPROVED investor can fund invoices; an unapproved wallet is stopped up front (funds never get stuck)."
-    function test_claim_onlyApprovedInvestorsCanFundOrBuy() public {
-        (uint256 id,) = _invoice(1_000_000e18, 90, "C-1");
+    /// "Any wallet can fund invoices or buy them: no approval step."
+    function test_claim_anyWalletCanFundOrBuy() public {
+        (uint256 id, InvoiceToken t) = _invoice(1_000_000e18, 90, "C-1");
         _pool(id, 600_000e18);
+        vm.prank(supplier);
+        market.sell(id, 100_000e18, 0, _dl()); // pool now holds invoice tokens
         vm.startPrank(anon);
-        vm.expectRevert(abi.encodeWithSelector(TegataMarket.NotEligible.selector, anon));
-        market.postBids(id, 100_000e18, 0, 150, _dl());
-        vm.expectRevert(abi.encodeWithSelector(TegataMarket.NotEligible.selector, anon));
-        market.buy(id, 1_000e18, 0, _dl());
+        (uint256 pos,) = market.postBids(id, 100_000e18, 0, 150, _dl());
+        uint256 out = market.buy(id, 1_000e18, 0, _dl());
         vm.stopPrank();
+        assertGt(pos, 0);
+        assertGt(out, 0);
+        assertEq(t.balanceOf(anon), out);
     }
 
     /// "The supplier can sell ¥10,000 or ¥200,000 of an invoice at any time, settled in JPYC."
@@ -120,12 +119,9 @@ contract ClaimsTest is Test {
         uint256 held = t.balanceOf(investor);
         assertApproxEqAbs(held, 100_000e18, 1e18);
 
-        // Another approved investor makes a market; the first one exits 30 days later, before maturity.
+        // Another investor makes a market; the first one exits 30 days later, before maturity.
         address lp2 = makeAddr("second investor");
         jpyc.mint(lp2, 1_000_000e18);
-        vm.startPrank(operator);
-        registry.approveInvestor(lp2, true);
-        vm.stopPrank();
         vm.warp(block.timestamp + 30 days);
         vm.startPrank(lp2);
         jpyc.approve(address(market), type(uint256).max);
