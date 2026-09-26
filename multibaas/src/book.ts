@@ -34,6 +34,20 @@ export const registeredQuery: MultiBaas.EventQuery = {
   ],
 };
 
+/// Invoice reference numbers and party names (RWA metadata).
+export const metadataQuery: MultiBaas.EventQuery = {
+  events: [
+    {
+      eventName: 'InvoiceMetadata',
+      select: [
+        { type: 'input', inputIndex: 0, alias: 'id' },
+        { type: 'input', inputIndex: 1, alias: 'ref' },
+      ],
+      filter: byAlias(LABELS.registry),
+    },
+  ],
+};
+
 /// JPYC paid in per invoice (aggregated).
 export const paidQuery: MultiBaas.EventQuery = {
   events: [
@@ -111,6 +125,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     run(rejectedQuery),
     run(creditQuery, 20),
   ]);
+  const refById = new Map((await run(metadataQuery)).map((r) => [String(r.id), String(r.ref)]));
   const rejectedIds = new Set(rejected.map((r) => String(r.id)));
   const paidById = new Map(paid.map((r) => [String(r.id), String(r.paid)]));
   console.log('Receivables book (MultiBaas Event Queries)\n');
@@ -120,7 +135,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const outstanding = isRejected ? 0n : BigInt(String(r.face)) - BigInt(paidById.get(String(r.id)) ?? '0');
     byDebtor.set(String(r.debtor), (byDebtor.get(String(r.debtor)) ?? 0n) + outstanding);
     const due = new Date(Number(r.maturity) * 1000).toLocaleDateString('ja-JP', { timeZone: 'Asia/Tokyo' });
-    console.log(`#${r.id}  face ${yen(String(r.face))}  due ${due}  rate@issue ${Number(r.rate_at_issue_bps) / 100}%  outstanding ${yen(outstanding.toString())}${isRejected ? '  (rejected)' : ''}`);
+    console.log(`#${r.id} ${refById.get(String(r.id)) ?? ''}  face ${yen(String(r.face))}  due ${due}  rate@issue ${Number(r.rate_at_issue_bps) / 100}%  outstanding ${yen(outstanding.toString())}${isRejected ? '  (rejected)' : ''}`);
   }
   console.log('\nOutstanding by debtor:');
   for (const [debtor, amt] of byDebtor) console.log(`  ${debtor}  ${yen(amt.toString())}`);

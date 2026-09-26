@@ -19,6 +19,7 @@ export type Deployment = {
   jpyc: string;
   registry: string;
   risk: string;
+  vault: string;
   hook: string;
   market: string;
   operator: string;
@@ -45,13 +46,25 @@ export function baseContract(label: string, contract: string) {
   return { label, contractName: contract, version: versionOf(label), rawAbi: JSON.stringify(abi), bin };
 }
 
-/// ABI versions in the MultiBaas library. 2.0 = credit-priced registry + hardened market (2026-09-26).
-export const versionOf = (label: string) => (label === LABELS.poolManager || label === LABELS.invoiceToken ? '1.0' : '2.0');
+/// ABI versions in the MultiBaas library. Bump a label's version whenever its ABI changes: MultiBaas keeps the first
+/// ABI registered under a (label, version), so re-registering with the same version silently keeps the old one.
+///   registry 4.0 = + collateral (outstandingOf, CollateralRequired) · risk 3.0 = + vault · market 3.0 = + NotEligible
+export const VERSIONS: Record<string, string> = {
+  tegata_invoice_registry: '4.0',
+  tegata_credit_risk: '3.0',
+  tegata_collateral_vault: '2.0',
+  tegata_curve_hook: '2.0',
+  tegata_market: '3.0',
+  tegata_invoice_token: '3.0',
+  uniswap_v4_pool_manager: '1.0',
+};
+export const versionOf = (label: string) => VERSIONS[label] ?? '1.0';
 
 /// MultiBaas contract labels (ABI library) — also used as address aliases for singletons.
 export const LABELS = {
   registry: 'tegata_invoice_registry',
   risk: 'tegata_credit_risk',
+  vault: 'tegata_collateral_vault',
   hook: 'tegata_curve_hook',
   market: 'tegata_market',
   invoiceToken: 'tegata_invoice_token',

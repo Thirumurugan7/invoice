@@ -11,6 +11,7 @@ import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
 
 import {InvoiceRegistry} from "../src/rwa/InvoiceRegistry.sol";
 import {CreditRiskModel} from "../src/rwa/CreditRiskModel.sol";
+import {CollateralVault} from "../src/rwa/CollateralVault.sol";
 import {InvoiceToken} from "../src/rwa/InvoiceToken.sol";
 import {MockJPYC} from "../src/rwa/MockJPYC.sol";
 import {MaturityCurveHook} from "../src/hook/MaturityCurveHook.sol";
@@ -39,7 +40,8 @@ contract TegataMarketTest is Test {
         IPoolManager manager = new PoolManager(address(this));
         jpyc = new MockJPYC(address(this));
         CreditRiskModel risk = new CreditRiskModel(operator);
-        registry = new InvoiceRegistry(jpyc, risk, operator);
+        CollateralVault vault = new CollateralVault(jpyc, risk, operator);
+        registry = new InvoiceRegistry(jpyc, risk, vault, operator);
         bytes memory args = abi.encode(manager, registry, Currency.wrap(address(jpyc)), operator);
         (, bytes32 salt) = HookMiner.find(address(this), FLAGS, type(MaturityCurveHook).creationCode, args);
         hook = new MaturityCurveHook{salt: salt}(manager, registry, Currency.wrap(address(jpyc)), operator);
@@ -49,10 +51,15 @@ contract TegataMarketTest is Test {
         registry.verifyCompany(supplier, keccak256("corp:1"), "Sakura Seiko");
         registry.verifyCompany(debtor, keccak256("corp:2"), "Tokyo Motors");
         risk.setRegistry(address(registry));
+        risk.setVault(address(vault));
+        vault.setRegistry(address(registry));
         risk.rate(debtor, 2); // 3%
+        registry.setVenue(address(manager), true);
+        registry.approveInvestor(investor, true);
+        registry.approveInvestor(buyer, true);
         vm.stopPrank();
         vm.prank(supplier);
-        id = registry.registerInvoice(debtor, 1_000_000e18, uint64(block.timestamp + 90 days), keccak256("pdf"));
+        id = registry.registerInvoice(debtor, 1_000_000e18, uint64(block.timestamp + 90 days), keccak256("pdf"), "");
         vm.prank(debtor);
         registry.acceptInvoice(id);
         token = registry.invoice(id).token;

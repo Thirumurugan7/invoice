@@ -35,6 +35,7 @@ export function SupplierPage({ dep, s, book, send }: Props) {
   const [days, setDays] = useState('60');
   const [docHash, setDocHash] = useState<`0x${string}`>();
   const [fileName, setFileName] = useState('');
+  const [ref, setRef] = useState('');
   const mine = book.invoices.filter((i) => i.supplier.toLowerCase() === s.account.toLowerCase() || i.myTokens > 0n);
   return (
     <div className="grid">
@@ -49,12 +50,14 @@ export function SupplierPage({ dep, s, book, send }: Props) {
               const f = e.target.files?.[0];
               if (f) {
                 setFileName(f.name);
+                if (!ref) setRef(f.name.replace(/\.[^.]+$/, '').replace(/^invoice-/i, ''));
                 setDocHash(await sha256File(f));
               }
             }}
           />
         </label>
         {docHash && <p className="muted mono">{fileName}: {short(docHash)}</p>}
+        <F label="Invoice number (請求書番号)" value={ref} set={setRef} ph="SKR-2026-0926-001" />
         <F label="Debtor address (verified company)" value={debtor} set={setDebtor} ph="0x… debtor wallet" />
         <F label="Face value (JPYC)" value={face} set={setFace} />
         <F label="Days to maturity" value={days} set={setDays} />
@@ -69,6 +72,7 @@ export function SupplierPage({ dep, s, book, send }: Props) {
               u(face),
               BigInt(book.chainTime + Number(days) * 86400),
               docHash ?? keccak256(toBytes(`${debtor}-${face}-${days}-${Date.now()}`)),
+              ref,
             ])
           }
         >
@@ -76,23 +80,24 @@ export function SupplierPage({ dep, s, book, send }: Props) {
         </button>
       </section>
       {mine.map((inv) => (
-        <SellCard key={inv.id} inv={inv} dep={dep} book={book} send={send} />
+        <SellCard key={inv.id} inv={inv} dep={dep} book={book} send={send} s={s} />
       ))}
     </div>
   );
 }
 
-function SellCard({ inv, dep, book, send }: { inv: InvoiceRow; dep: Deployment; book: Book; send: Send }) {
+function SellCard({ inv, dep, book, send, s }: { inv: InvoiceRow; dep: Deployment; book: Book; send: Send; s: Session }) {
   const [amt, setAmt] = useState('100000');
   const fairValue = (u(amt) * inv.fair) / 10n ** 18n;
   return (
     <section className="card">
       <h3>
-        Invoice #{inv.id} <Badge inv={inv} />
+        Invoice #{inv.id} <span className="mono muted">{inv.ref}</span> <Badge inv={inv} />
       </h3>
       <p className="muted">
         {inv.debtorName || short(inv.debtor)} · face {yen(inv.face)} · due {jst(inv.maturity)}
       </p>
+      <InvoiceRecord inv={inv} s={s} />
       <p>You hold {yen(inv.myTokens)} face in tokens</p>
       <p className="muted">Debtor grade {inv.debtorGrade} · rate {pct(inv.rateBps)} (at registration {pct(inv.rateAtIssueBps)})</p>
       {inv.status === 2 && inv.poolCreated && (
@@ -118,9 +123,31 @@ function SellCard({ inv, dep, book, send }: { inv: InvoiceRow; dep: Deployment; 
   );
 }
 
+/// The invoice's real-world details, read from chain: InvoiceToken.contractURI() (ERC-7572 JSON built by the registry).
+function InvoiceRecord({ inv, s }: { inv: InvoiceRow; s: Session }) {
+  const [json, setJson] = useState<string>();
+  return (
+    <details
+      className="record"
+      onToggle={(e) => {
+        if (!(e.target as HTMLDetailsElement).open) return;
+        (s.pub.readContract({ address: inv.token, abi: ABI.token as any, functionName: 'contractURI' }) as Promise<string>)
+          .then((uri) => setJson(JSON.stringify(JSON.parse(uri.slice(uri.indexOf(',') + 1)), null, 2)))
+          .catch((e) => setJson(String(e?.shortMessage ?? e)));
+      }}
+    >
+      <summary className="muted small-text">On-chain invoice record (contractURI)</summary>
+      <pre className="mono">{json ?? 'loading…'}</pre>
+    </details>
+  );
+}
+
 // ---------------------------------------------------------------- Debtor
 export function DebtorPage({ dep, s, book, send }: Props) {
   const mine = book.invoices.filter((i) => i.debtor.toLowerCase() === s.account.toLowerCase());
+  const [amt, setAmt] = useState('20000');
+  const m = book.me;
+  const weak = m.grade >= 4;
   return (
     <div className="grid">
       <section className="card">
@@ -130,11 +157,33 @@ export function DebtorPage({ dep, s, book, send }: Props) {
           Approve JPYC for payments
         </button>
       </section>
+      <section className="card">
+        <h3>Collateral (担保)</h3>
+        <p className="muted">
+          {m.grade === 0
+            ? 'Not rated yet.'
+            : weak
+              ? `Grade G${m.grade}: weak credit — you must lock 20% of what you owe before suppliers can invoice you.`
+              : `Grade G${m.grade}: collateral optional — locking JPYC lowers your rate by up to 2% (at 100% coverage).`}
+        </p>
+        <p>
+          Outstanding {yen(m.outstanding)} · locked <b>{yen(m.collateral)}</b> · required {yen(m.collateralRequired)} · coverage {(m.coverageBps / 100).toFixed(0)}%
+        </p>
+        <F label="Amount (JPYC)" value={amt} set={setAmt} />
+        <div className="row">
+          {m.jpycAllowanceVault < u(amt) && (
+            <button className="ghost" onClick={() => send('Approve JPYC for collateral', dep.jpyc, ABI.jpyc, 'approve', [dep.vault, MAX])}>Approve</button>
+          )}
+          <button onClick={() => send(`Lock ${amt} JPYC collateral`, dep.vault, ABI.vault, 'deposit', [u(amt)])}>Lock collateral</button>
+          <button className="ghost" onClick={() => send(`Withdraw ${amt} JPYC collateral`, dep.vault, ABI.vault, 'withdraw', [u(amt)])}>Withdraw</button>
+        </div>
+        <p className="muted small-text">If an invoice defaults, locked collateral is paid to its holders automatically.</p>
+      </section>
       {mine.length === 0 && <p className="muted">No invoices addressed to you.</p>}
       {mine.map((inv) => (
         <section className="card" key={inv.id}>
           <h3>
-            Invoice #{inv.id} <Badge inv={inv} />
+            Invoice #{inv.id} <span className="mono muted">{inv.ref}</span> <Badge inv={inv} />
           </h3>
           <p className="muted">from {inv.supplierName || short(inv.supplier)} · due {jst(inv.maturity)}</p>
           <p>
@@ -160,12 +209,18 @@ export function DebtorPage({ dep, s, book, send }: Props) {
 }
 
 // ---------------------------------------------------------------- Investor / market
-export function InvestorPage({ dep, book, send }: Props) {
+export function InvestorPage({ dep, s, book, send }: Props) {
   const [bid, setBid] = useState('300000');
   const [buyAmt, setBuyAmt] = useState('50000');
   const [offset, setOffset] = useState('0');
   return (
     <div>
+      {s.kind !== 'readonly' && !book.me.canHold && (
+        <div className="banner error">
+          This wallet is not approved to hold invoice tokens. Invoices are permissioned RWAs: the operator must approve your wallet (investor KYC) before you can
+          buy or post bids.
+        </div>
+      )}
       <p className="muted">
         JPYC {yen(book.me.jpyc)} · curve band ±{String(book.bandBps)} bps ·{' '}
         <button className="ghost small" onClick={() => send('Approve JPYC for market', dep.jpyc, ABI.jpyc, 'approve', [dep.market, MAX])}>
@@ -193,12 +248,15 @@ export function InvestorPage({ dep, book, send }: Props) {
             const d = daysLeft(inv, book.chainTime);
             return (
               <tr key={inv.id}>
-                <td>{inv.id}</td>
+                <td>
+                  {inv.id} <div className="mono muted small-text">{inv.ref}</div>
+                </td>
                 <td>{inv.debtorName || short(inv.debtor)}</td>
                 <td>{yen(inv.face)}</td>
                 <td>{d.toFixed(1)}</td>
                 <td title={`rate at registration ${pct(inv.rateAtIssueBps)}`}>
                   G{inv.debtorGrade} · {pct(inv.rateBps)}
+                  {inv.debtorCoverageBps > 0 && <div className="muted small-text">🔒 {(inv.debtorCoverageBps / 100).toFixed(0)}% collateral</div>}
                 </td>
                 <td>{price(inv.fair)}</td>
                 <td>{inv.poolPrice ? price(inv.poolPrice) : '—'}</td>
@@ -264,6 +322,7 @@ export function OperatorPage({ dep, book, send }: Props) {
   const [debtor, setDebtor] = useState('');
   const [grade, setGrade] = useState('2');
   const [base, setBase] = useState('');
+  const [inv, setInv] = useState('');
   return (
     <div className="grid">
       <section className="card">
@@ -278,6 +337,15 @@ export function OperatorPage({ dep, book, send }: Props) {
         <button disabled={!isAddress(who) || !corp} onClick={() => send('Verify company', dep.registry, ABI.registry, 'verifyCompany', [who, keccak256(toBytes(`corp:${corp}`)), name])}>
           Verify
         </button>
+      </section>
+      <section className="card">
+        <h3>Investor KYC: who may hold invoices</h3>
+        <p className="muted">Invoice tokens only move to KYB-verified companies, approved investors and approved venues (the Uniswap v4 PoolManager).</p>
+        <F label="Investor wallet" value={inv} set={setInv} ph="0x…" />
+        <div className="row">
+          <button disabled={!isAddress(inv)} onClick={() => send('Approve investor', dep.registry, ABI.registry, 'approveInvestor', [inv, true])}>Approve</button>
+          <button className="ghost" disabled={!isAddress(inv)} onClick={() => send('Revoke investor', dep.registry, ABI.registry, 'approveInvestor', [inv, false])}>Revoke</button>
+        </div>
       </section>
       <section className="card">
         <h3>Credit: rate debtor</h3>

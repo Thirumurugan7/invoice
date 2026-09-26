@@ -15,7 +15,7 @@ contract CreditRiskTest is TegataBase {
 
     function _smallInvoice(uint64 mat, bytes32 doc) internal returns (uint256 id) {
         vm.prank(supplier);
-        id = registry.registerInvoice(debtor, 5_000e18, mat, doc);
+        id = registry.registerInvoice(debtor, 5_000e18, mat, doc, "");
         vm.prank(debtor);
         registry.acceptInvoice(id);
     }
@@ -33,7 +33,7 @@ contract CreditRiskTest is TegataBase {
         registry.verifyCompany(unrated, keccak256("corp:9"), "Unrated KK");
         vm.prank(supplier);
         vm.expectRevert(abi.encodeWithSelector(InvoiceRegistry.NotRated.selector, unrated));
-        registry.registerInvoice(unrated, FACE, maturity, keccak256("z"));
+        registry.registerInvoice(unrated, FACE, maturity, keccak256("z"), "");
     }
 
     function test_onlyRegistryRecordsHistory() public {

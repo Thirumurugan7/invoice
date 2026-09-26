@@ -3,6 +3,10 @@ pragma solidity ^0.8.26;
 
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 
+interface ICollateralCoverage {
+    function coverageBps(address debtor) external view returns (uint256);
+}
+
 /// @title CreditRiskModel — the debtor's discount rate, priced from rating + on-chain payment history
 /// @notice The supplier does not choose the rate. Every invoice's fair-value curve uses the DEBTOR's live rate:
 ///
@@ -11,6 +15,7 @@ import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 ///                + defaults  × DEFAULT_PENALTY                 (registry: each invoice the debtor defaulted on)
 ///                + latePays  × LATE_PENALTY                    (registry: settled after maturity, before default)
 ///                − min(onTime, ON_TIME_CAP) × ON_TIME_CREDIT   (registry: settled on or before maturity)
+///                − coverage × COLLATERAL_CREDIT                 (CollateralVault: JPYC locked vs outstanding)
 ///
 ///   clamped to [baseRate, MAX_RATE]. A downgrade or a default therefore reprices every open invoice of that debtor
 ///   at once: the hook's band follows the new curve, so buying above it is blocked and holders can only exit toward it.
@@ -23,6 +28,7 @@ contract CreditRiskModel is AccessControl {
     uint32 public constant LATE_PENALTY = 100;
     uint32 public constant ON_TIME_CREDIT = 10;
     uint32 public constant ON_TIME_CAP = 10;
+    uint32 public constant COLLATERAL_CREDIT = 200; // −2% at 100% collateral coverage
 
     struct History {
         uint32 onTime;
@@ -31,6 +37,7 @@ contract CreditRiskModel is AccessControl {
     }
 
     address public registry;
+    ICollateralCoverage public vault;
     uint32 public baseRateBps;
     uint32[MAX_GRADE + 1] public gradeSpreadBps; // index 0 unused (unrated)
     mapping(address => uint8) public gradeOf;
@@ -43,6 +50,7 @@ contract CreditRiskModel is AccessControl {
     }
 
     event RegistrySet(address registry);
+    event VaultSet(address vault);
     event BaseRateSet(uint32 bps);
     event GradeSpreadSet(uint8 indexed grade, uint32 bps);
     event DebtorRated(address indexed debtor, uint8 grade, uint32 rateBps);
@@ -64,6 +72,13 @@ contract CreditRiskModel is AccessControl {
         if (registry != address(0)) revert RegistryAlreadySet();
         registry = registry_;
         emit RegistrySet(registry_);
+    }
+
+    /// @notice One-time wiring: collateral coverage lowers the debtor's rate.
+    function setVault(address vault_) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (address(vault) != address(0)) revert RegistryAlreadySet();
+        vault = ICollateralCoverage(vault_);
+        emit VaultSet(vault_);
     }
 
     // ---------------------------------------------------------------- operator (MultiBaas)
@@ -106,6 +121,7 @@ contract CreditRiskModel is AccessControl {
         uint256 up = uint256(baseRateBps) + gradeSpreadBps[gradeOf[debtor]] + uint256(h.defaults) * DEFAULT_PENALTY
             + uint256(h.late) * LATE_PENALTY;
         uint256 credit = uint256(h.onTime < ON_TIME_CAP ? h.onTime : ON_TIME_CAP) * ON_TIME_CREDIT;
+        if (address(vault) != address(0)) credit += vault.coverageBps(debtor) * COLLATERAL_CREDIT / 10_000;
         uint256 r = up > credit ? up - credit : 0;
         if (r < baseRateBps) r = baseRateBps;
         return uint32(r > MAX_RATE ? MAX_RATE : r);

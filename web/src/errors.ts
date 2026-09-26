@@ -1,7 +1,7 @@
 import { BaseError, ContractFunctionRevertedError, decodeErrorResult, type Hex } from 'viem';
 import { ABI } from './chain';
 
-const ALL_ERRORS = [...ABI.registry, ...ABI.risk, ...ABI.hook, ...ABI.market, ...ABI.token, ...ABI.jpyc, ...ABI.customRevert, ...ABI.hooks].filter(
+const ALL_ERRORS = [...ABI.registry, ...ABI.risk, ...ABI.vault, ...ABI.hook, ...ABI.market, ...ABI.token, ...ABI.jpyc, ...ABI.customRevert, ...ABI.hooks].filter(
   (x: any) => x.type === 'error',
 ) as any[];
 
@@ -15,6 +15,9 @@ const EXPLAIN: Record<string, (a: readonly unknown[]) => string> = {
   NotVerified: (a) => `${short(a[0])} is not a KYB-verified company.`,
   NotRated: (a) => `${short(a[0])} has no credit grade yet — the operator must rate the debtor before invoices can be priced.`,
   Expired: () => 'Transaction deadline passed.',
+  CollateralRequired: (a) => `${short(a[0])} is a weak-credit debtor (G4–G5) and must lock collateral first: needs ${yen(a[1] as bigint)} JPYC, has ${yen(a[2] as bigint)}. The debtor deposits it on the Debtor tab.`,
+  BelowRequired: (a) => `Can't withdraw that much: outstanding invoices require ${yen(a[0] as bigint)} of collateral, and only ${yen(a[1] as bigint)} would remain.`,
+  NotEligible: (a) => `${short(a[0])} is not allowed to hold invoice tokens. Invoices are permissioned RWAs: only KYB-verified companies and operator-approved investors can hold them.`,
   NotOwner: () => 'Not your bid position.',
   DuplicateInvoice: (a) => `This invoice document is already financed as invoice #${a[0]} (二重譲渡 blocked).`,
   InvalidTerms: () => 'Invalid terms (face > 0, tenor ≥ 1 day, debtor ≠ supplier).',
@@ -31,6 +34,9 @@ const EXPLAIN: Record<string, (a: readonly unknown[]) => string> = {
 export type DecodedRevert = { name: string; message: string; chain: string[] };
 
 export function explainError(err: unknown): DecodedRevert {
+  const code = (err as any)?.code ?? (err instanceof BaseError ? (err.walk((e: any) => e?.code === 4001) as any)?.code : undefined);
+  if (code === 4001 || (err as any)?.name === 'UserRejectedRequestError' || /user rejected|user denied/i.test(String((err as any)?.message)))
+    return { name: 'Rejected in wallet', message: 'You rejected the request in your wallet.', chain: [] };
   const data = revertData(err);
   if (!data) return { name: 'Error', message: err instanceof BaseError ? err.shortMessage : String((err as any)?.message ?? err), chain: [] };
   return decodeNested(data, []);

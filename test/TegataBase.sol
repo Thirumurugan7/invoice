@@ -21,6 +21,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {InvoiceRegistry} from "../src/rwa/InvoiceRegistry.sol";
 import {CreditRiskModel} from "../src/rwa/CreditRiskModel.sol";
+import {CollateralVault} from "../src/rwa/CollateralVault.sol";
 import {InvoiceToken} from "../src/rwa/InvoiceToken.sol";
 import {MockJPYC} from "../src/rwa/MockJPYC.sol";
 import {MaturityCurveHook} from "../src/hook/MaturityCurveHook.sol";
@@ -47,6 +48,7 @@ abstract contract TegataBase is Test {
     IPoolManager manager;
     MockJPYC jpyc;
     CreditRiskModel risk;
+    CollateralVault vault;
     InvoiceRegistry registry;
     MaturityCurveHook hook;
     PoolModifyLiquidityTest lpRouter;
@@ -63,7 +65,8 @@ abstract contract TegataBase is Test {
         manager = new PoolManager(address(this));
         jpyc = new MockJPYC(address(this));
         risk = new CreditRiskModel(operator);
-        registry = new InvoiceRegistry(jpyc, risk, operator);
+        vault = new CollateralVault(jpyc, risk, operator);
+        registry = new InvoiceRegistry(jpyc, risk, vault, operator);
 
         bytes memory args = abi.encode(manager, registry, Currency.wrap(address(jpyc)), operator);
         (address hookAddr, bytes32 salt) = HookMiner.find(address(this), FLAGS, type(MaturityCurveHook).creationCode, args);
@@ -76,12 +79,16 @@ abstract contract TegataBase is Test {
         registry.verifyCompany(supplier, keccak256("corp:1010001000001"), unicode"株式会社さくら精工");
         registry.verifyCompany(debtor, keccak256("corp:2010001000002"), unicode"東京モーターズ株式会社");
         risk.setRegistry(address(registry));
+        risk.setVault(address(vault));
+        vault.setRegistry(address(registry));
         risk.rate(debtor, DEBTOR_GRADE);
+        registry.setVenue(address(manager), true); // the Uniswap v4 PoolManager custodies pool balances
+        registry.approveInvestor(investor, true);
         vm.stopPrank();
 
         maturity = uint64(block.timestamp + 90 days);
         vm.prank(supplier);
-        invoiceId = registry.registerInvoice(debtor, FACE, maturity, DOC);
+        invoiceId = registry.registerInvoice(debtor, FACE, maturity, DOC, "SKR-2026-0925-001");
         vm.prank(debtor);
         registry.acceptInvoice(invoiceId);
         token = registry.invoice(invoiceId).token;

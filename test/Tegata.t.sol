@@ -26,25 +26,25 @@ contract TegataTest is TegataBase {
         address rogue = makeAddr("rogue");
         vm.prank(rogue);
         vm.expectRevert(abi.encodeWithSelector(InvoiceRegistry.NotVerified.selector, rogue));
-        registry.registerInvoice(debtor, FACE, maturity, keccak256("x"));
+        registry.registerInvoice(debtor, FACE, maturity, keccak256("x"), "");
     }
 
     function test_unverifiedDebtorRejected() public {
         address shell = makeAddr("shell company");
         vm.prank(supplier);
         vm.expectRevert(abi.encodeWithSelector(InvoiceRegistry.NotVerified.selector, shell));
-        registry.registerInvoice(shell, FACE, maturity, keccak256("y"));
+        registry.registerInvoice(shell, FACE, maturity, keccak256("y"), "");
     }
 
     function test_sameInvoiceCannotBeFinancedTwice() public {
         vm.prank(supplier);
         vm.expectRevert(abi.encodeWithSelector(InvoiceRegistry.DuplicateInvoice.selector, invoiceId));
-        registry.registerInvoice(debtor, FACE, maturity, DOC); // 二重譲渡 blocked
+        registry.registerInvoice(debtor, FACE, maturity, DOC, ""); // 二重譲渡 blocked
     }
 
     function test_onlyDebtorAcceptsAndCanReject() public {
         vm.prank(supplier);
-        uint256 id2 = registry.registerInvoice(debtor, 5_000e18, maturity, keccak256("inv-2"));
+        uint256 id2 = registry.registerInvoice(debtor, 5_000e18, maturity, keccak256("inv-2"), "");
         vm.prank(supplier);
         vm.expectRevert(InvoiceRegistry.NotDebtor.selector);
         registry.acceptInvoice(id2);
@@ -125,7 +125,7 @@ contract TegataTest is TegataBase {
 
     function test_poolForUnacceptedInvoiceCannotInit() public {
         vm.prank(supplier);
-        uint256 id2 = registry.registerInvoice(debtor, 5_000e18, maturity, keccak256("inv-pending"));
+        uint256 id2 = registry.registerInvoice(debtor, 5_000e18, maturity, keccak256("inv-pending"), "");
         InvoiceToken t2 = registry.invoice(id2).token;
         PoolKey memory k2 = _keyFor(address(t2));
         vm.expectRevert(
@@ -140,8 +140,13 @@ contract TegataTest is TegataBase {
         registry.verifyCompany(weak, keccak256("corp:3"), "Weak KK");
         risk.rate(weak, 5); // 1% + 16% = 17%
         vm.stopPrank();
+        jpyc.mint(weak, 1_000e18);
+        vm.startPrank(weak); // G5 must lock 20% of what it will owe before being invoiced
+        jpyc.approve(address(vault), 1_000e18);
+        vault.deposit(1_000e18);
+        vm.stopPrank();
         vm.prank(supplier);
-        uint256 id2 = registry.registerInvoice(weak, 5_000e18, maturity, keccak256("inv-offcurve"));
+        uint256 id2 = registry.registerInvoice(weak, 5_000e18, maturity, keccak256("inv-offcurve"), "");
         vm.prank(weak);
         registry.acceptInvoice(id2);
         PoolKey memory k2 = _keyFor(address(registry.invoice(id2).token));

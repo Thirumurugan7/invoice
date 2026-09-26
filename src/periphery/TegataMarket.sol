@@ -69,6 +69,15 @@ contract TegataMarket is IUnlockCallback {
     error NoPosition();
     error UnknownInvoice();
     error BadRange();
+    error NotEligible(address holder);
+
+    /// Invoice tokens are permissioned (registry.canHold). Anyone who could end up holding them — a buyer, or an LP
+    /// whose JPYC bids get filled with invoice tokens — must be eligible up front, so funds can never get stuck in a
+    /// position that can't be withdrawn.
+    modifier onlyEligible() {
+        if (!registry.canHold(msg.sender)) revert NotEligible(msg.sender);
+        _;
+    }
 
     modifier checkDeadline(uint256 deadline) {
         if (block.timestamp > deadline) revert Expired(deadline);
@@ -122,6 +131,7 @@ contract TegataMarket is IUnlockCallback {
     function postBids(uint256 id, uint256 jpycAmount, int24 offsetTicks, int24 depthTicks, uint256 deadline)
         external
         checkDeadline(deadline)
+        onlyEligible
         returns (uint256 positionId, uint128 liquidity)
     {
         if (depthTicks <= 0 || depthTicks % TICK_SPACING != 0 || offsetTicks < 0 || offsetTicks % TICK_SPACING != 0) {
@@ -191,6 +201,7 @@ contract TegataMarket is IUnlockCallback {
     function buy(uint256 id, uint256 jpycIn, uint256 minOut, uint256 deadline)
         external
         checkDeadline(deadline)
+        onlyEligible
         returns (uint256 out)
     {
         (, out) = _trade(id, false, true, jpycIn);
@@ -202,6 +213,7 @@ contract TegataMarket is IUnlockCallback {
     function buyExactOut(uint256 id, uint256 tokensOut, uint256 maxJpycIn, uint256 deadline)
         external
         checkDeadline(deadline)
+        onlyEligible
         returns (uint256 paid)
     {
         (paid,) = _trade(id, false, false, tokensOut);

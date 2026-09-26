@@ -8,6 +8,8 @@
 //   npm run operator -- default <invoiceId>
 //   npm run operator -- rate <debtor> <grade 1..5>      (CreditRiskModel: reprices all the debtor's invoices)
 //   npm run operator -- base <bps>                      (CreditRiskModel base rate)
+//   npm run operator -- approve-investor <addr> [false] (investor KYC: may hold invoice tokens)
+//   npm run operator -- venue <addr> [false]            (contract allowed to custody invoice tokens)
 //   npm run operator -- wallets
 import * as MultiBaas from '@curvegrid/multibaas-sdk';
 import { createHash } from 'node:crypto';
@@ -81,9 +83,15 @@ switch (cmd) {
   case 'rate':
     await send('rate', [args[0], Number(args[1])], LABELS.risk);
     break;
+  case 'approve-investor':
+    await send('approveInvestor', [args[0], args[1] !== 'false']);
+    break;
+  case 'venue':
+    await send('setVenue', [args[0], args[1] !== 'false']);
+    break;
   case 'base':
     await send('setBaseRate', [Number(args[0])], LABELS.risk);
     break;
   default:
-    console.log('usage: operator wallets | verify <addr> <corpNumber> <name> | freeze <id> <true|false> | default <id> | rate <debtor> <grade> | base <bps>');
+    console.log('usage: operator wallets | verify <addr> <corpNumber> <name> | freeze <id> <true|false> | default <id> | rate <debtor> <grade> | base <bps> | approve-investor <addr> [false] | venue <addr> [false]');
 }

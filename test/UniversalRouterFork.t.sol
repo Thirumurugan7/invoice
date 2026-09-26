@@ -15,6 +15,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {InvoiceRegistry} from "../src/rwa/InvoiceRegistry.sol";
 import {InvoiceToken} from "../src/rwa/InvoiceToken.sol";
 import {CreditRiskModel} from "../src/rwa/CreditRiskModel.sol";
+import {CollateralVault} from "../src/rwa/CollateralVault.sol";
 import {MaturityCurveHook} from "../src/hook/MaturityCurveHook.sol";
 import {TegataMarket} from "../src/periphery/TegataMarket.sol";
 
@@ -57,7 +58,8 @@ contract UniversalRouterForkTest is Test {
         forked = true;
 
         CreditRiskModel risk = new CreditRiskModel(operator);
-        registry = new InvoiceRegistry(JPYC, risk, operator);
+        CollateralVault vault = new CollateralVault(JPYC, risk, operator);
+        registry = new InvoiceRegistry(JPYC, risk, vault, operator);
         bytes memory args = abi.encode(PM, registry, Currency.wrap(address(JPYC)), operator);
         (, bytes32 salt) = HookMiner.find(address(this), FLAGS, type(MaturityCurveHook).creationCode, args);
         MaturityCurveHook hook = new MaturityCurveHook{salt: salt}(PM, registry, Currency.wrap(address(JPYC)), operator);
@@ -67,10 +69,14 @@ contract UniversalRouterForkTest is Test {
         registry.verifyCompany(supplier, keccak256("corp:1"), "Sakura Seiko");
         registry.verifyCompany(debtor, keccak256("corp:2"), "Tokyo Motors");
         risk.setRegistry(address(registry));
+        risk.setVault(address(vault));
+        vault.setRegistry(address(registry));
         risk.rate(debtor, 2);
+        registry.setVenue(address(PM), true);
+        registry.approveInvestor(investor, true);
         vm.stopPrank();
         vm.prank(supplier);
-        id = registry.registerInvoice(debtor, 1_000_000e18, uint64(block.timestamp + 90 days), keccak256("ur-fork"));
+        id = registry.registerInvoice(debtor, 1_000_000e18, uint64(block.timestamp + 90 days), keccak256("ur-fork"), "");
         vm.prank(debtor);
         registry.acceptInvoice(id);
         token = registry.invoice(id).token;

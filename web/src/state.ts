@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { Address } from 'viem';
-import { ABI, type Deployment, type Session } from './chain';
+import { ABI, ensureChain, type Deployment, type Session } from './chain';
 import { explainError, type DecodedRevert } from './errors';
 
 export const STATUS = ['None', 'Pending', 'Accepted', 'Rejected', 'Settled', 'Defaulted'] as const;
 
 export type InvoiceRow = {
   id: number;
+  ref: string;
   supplier: Address;
   debtor: Address;
   supplierName: string;
@@ -17,6 +18,7 @@ export type InvoiceRow = {
   rateBps: number; // debtor's live rate (CreditRiskModel)
   rateAtIssueBps: number;
   debtorGrade: number;
+  debtorCoverageBps: number; // collateral / outstanding
   frozen: boolean;
   status: number;
   funded: bigint;
@@ -32,7 +34,7 @@ export type InvoiceRow = {
 export type Book = {
   chainTime: number;
   invoices: InvoiceRow[];
-  me: { jpyc: bigint; verified: boolean; name: string; isOperator: boolean; jpycAllowanceMarket: bigint; jpycAllowanceRegistry: bigint };
+  me: { eth: bigint; jpyc: bigint; grade: number; outstanding: bigint; collateral: bigint; collateralRequired: bigint; coverageBps: number; jpycAllowanceVault: bigint; canHold: boolean; approvedInvestor: boolean; verified: boolean; name: string; isOperator: boolean; jpycAllowanceMarket: bigint; jpycAllowanceRegistry: bigint };
   bandBps: bigint;
   baseRateBps: number;
 };
@@ -60,6 +62,19 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
         r(dep.hook, ABI.hook, 'bandBps'),
       ]);
       const baseRateBps = Number(await r(dep.risk, ABI.risk, 'baseRateBps'));
+      const eth = await s.pub.getBalance({ address: s.account });
+      const [grade, outstanding, collateral, collateralRequired, coverageBps, aVault] = await Promise.all([
+        r(dep.risk, ABI.risk, 'gradeOf', [s.account]),
+        r(dep.registry, ABI.registry, 'outstandingOf', [s.account]),
+        r(dep.vault, ABI.vault, 'collateralOf', [s.account]),
+        r(dep.vault, ABI.vault, 'required', [s.account, 0n]),
+        r(dep.vault, ABI.vault, 'coverageBps', [s.account]),
+        r(dep.jpyc, ABI.jpyc, 'allowance', [s.account, dep.vault]),
+      ]);
+      const [canHold, approvedInvestor] = await Promise.all([
+        r(dep.registry, ABI.registry, 'canHold', [s.account]),
+        r(dep.registry, ABI.registry, 'approvedInvestor', [s.account]),
+      ]);
       const pids = (await r(dep.market, ABI.market, 'positionsOf', [s.account])) as bigint[];
       const positions = await Promise.all(
         pids.map(async (pid) => {
@@ -70,7 +85,7 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
       const invoices: InvoiceRow[] = [];
       for (let id = 1; id <= count; id++) {
         const inv = await r(dep.registry, ABI.registry, 'invoice', [BigInt(id)]);
-        const [fair, tradable, poolCreated, supplierName, debtorName, myTokens, rateBps, debtorGrade] = await Promise.all([
+        const [fair, tradable, poolCreated, supplierName, debtorName, myTokens, rateBps, debtorGrade, ref, debtorCoverage] = await Promise.all([
           r(dep.registry, ABI.registry, 'fairPrice', [BigInt(id), BigInt(now)]),
           r(dep.registry, ABI.registry, 'isTradable', [BigInt(id)]),
           inv.status >= 2 ? r(dep.market, ABI.market, 'isPoolCreated', [BigInt(id)]).catch(() => false) : Promise.resolve(false),
@@ -79,6 +94,8 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
           r(inv.token, ABI.token, 'balanceOf', [s.account]),
           r(dep.registry, ABI.registry, 'rateOf', [BigInt(id)]),
           r(dep.risk, ABI.risk, 'gradeOf', [inv.debtor]),
+          r(dep.registry, ABI.registry, 'invoiceRef', [BigInt(id)]),
+          r(dep.vault, ABI.vault, 'coverageBps', [inv.debtor]),
         ]);
         let poolPrice: bigint | undefined;
         let deviationBps: bigint | undefined;
@@ -89,6 +106,7 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
         }
         invoices.push({
           id,
+          ref,
           supplier: inv.supplier,
           debtor: inv.debtor,
           supplierName,
@@ -99,6 +117,7 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
           rateBps: Number(rateBps),
           rateAtIssueBps: Number(inv.rateAtIssueBps),
           debtorGrade: Number(debtorGrade),
+          debtorCoverageBps: Number(debtorCoverage),
           frozen: inv.frozen,
           status: Number(inv.status),
           funded: inv.funded,
@@ -112,7 +131,7 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
         });
       }
       if (!live) return;
-      setBook({ chainTime: now, invoices, bandBps, baseRateBps, me: { jpyc, verified, name, isOperator, jpycAllowanceMarket: aMarket, jpycAllowanceRegistry: aRegistry } });
+      setBook({ chainTime: now, invoices, bandBps, baseRateBps, me: { eth, jpyc, grade: Number(grade), outstanding, collateral, collateralRequired, coverageBps: Number(coverageBps), jpycAllowanceVault: aVault, canHold, approvedInvestor, verified, name, isOperator, jpycAllowanceMarket: aMarket, jpycAllowanceRegistry: aRegistry } });
       setErr(undefined);
     };
     load().catch((e) => live && setErr(String(e?.shortMessage ?? e?.message ?? e)));
@@ -127,20 +146,24 @@ export function useBook(dep: Deployment | undefined, s: Session | undefined, tic
 
 export type TxStatus =
   | { kind: 'idle' }
-  | { kind: 'pending'; label: string }
+  | { kind: 'pending'; label: string; stage: 'wallet' | 'mining'; hash?: string }
   | { kind: 'ok'; label: string; hash: string }
   | { kind: 'error'; label: string; revert: DecodedRevert };
 
-export function useTx(s: Session | undefined, onDone: () => void) {
+export function useTx(s: Session | undefined, chainId: number | undefined, onDone: () => void, onNeedWallet: () => void) {
   const [status, setStatus] = useState<TxStatus>({ kind: 'idle' });
   const send = useCallback(
     async (label: string, address: Address, abi: readonly unknown[], functionName: string, args: unknown[]) => {
-      if (!s) return;
-      setStatus({ kind: 'pending', label });
+      if (!s?.wallet) return onNeedWallet();
+      setStatus({ kind: 'pending', label, stage: 'wallet' });
       try {
+        if (s.provider && chainId) await ensureChain(s.provider, chainId);
+        // Simulate first so a revert (e.g. the curve hook) is explained before the wallet pops up.
         const { request } = await s.pub.simulateContract({ account: s.account, address, abi: abi as any, functionName, args } as any);
         const hash = await s.wallet.writeContract({ ...(request as any), account: s.wallet.account ?? s.account });
-        await s.pub.waitForTransactionReceipt({ hash });
+        setStatus({ kind: 'pending', label, stage: 'mining', hash });
+        const receipt = await s.pub.waitForTransactionReceipt({ hash });
+        if (receipt.status !== 'success') throw new Error(`Transaction ${hash} reverted`);
         setStatus({ kind: 'ok', label, hash });
       } catch (e) {
         setStatus({ kind: 'error', label, revert: explainError(e) });
@@ -148,7 +171,7 @@ export function useTx(s: Session | undefined, onDone: () => void) {
         onDone();
       }
     },
-    [s, onDone],
+    [s, chainId, onDone, onNeedWallet],
   );
   return { status, send };
 }

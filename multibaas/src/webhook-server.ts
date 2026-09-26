@@ -48,6 +48,18 @@ async function onEvent(data: any) {
     case 'InvoiceDefaulted':
       console.log(`[defaulted] invoice #${inputs.id} funded ${inputs.funded}/${inputs.face} -> holders redeem pro-rata`);
       break;
+    case 'InvoiceMetadata':
+      console.log(`[rwa] invoice #${inputs.id} ref=${inputs.ref} ${inputs.supplierName} -> ${inputs.debtorName}`);
+      break;
+    case 'InvestorApproved':
+      console.log(`[rwa] investor ${inputs.investor} ${inputs.approved ? 'approved (KYC) — may hold invoices' : 'revoked'}`);
+      break;
+    case 'CollateralDeposited':
+      console.log(`[collateral] ${inputs.debtor} locked ${Number(BigInt(String(inputs.amount)) / 10n ** 18n)} JPYC (total ${Number(BigInt(String(inputs.total)) / 10n ** 18n)})`);
+      break;
+    case 'CollateralSeized':
+      console.log(`[collateral] SEIZED ${Number(BigInt(String(inputs.amount)) / 10n ** 18n)} JPYC from ${inputs.debtor} into invoice #${inputs.invoiceId} payout`);
+      break;
     case 'DebtorRated':
       console.log(`[credit] ${inputs.debtor} rated G${inputs.grade} -> rate ${Number(inputs.rateBps) / 100}%: every open invoice of this debtor repriced`);
       break;

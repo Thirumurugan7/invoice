@@ -39,3 +39,14 @@ td.actions { display:flex; gap:6px; flex-wrap:wrap; }
 .ladder { display:grid; grid-template-columns:70px 1fr 110px; gap:8px; align-items:center; margin:6px 0; }
 .ladder .bar { height:10px; background:var(--accent); border-radius:4px; min-width:2px; }
 main { overflow-x:auto; }
+.wallet-chip { display:flex; gap:8px; align-items:center; border:1px solid var(--line); border-radius:999px; padding:4px 6px 4px 12px; background:var(--card); }
+.wallet-chip a { color:var(--ink); text-decoration:none; }
+.dot { width:8px; height:8px; border-radius:50%; display:inline-block; } .dot.good { background:var(--good); } .dot.bad { background:var(--bad); }
+.wallet-connect { position:relative; display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
+.picker { position:absolute; top:44px; right:0; z-index:5; display:flex; flex-direction:column; gap:6px; background:var(--card); border:1px solid var(--line); border-radius:10px; padding:8px; min-width:200px; }
+.picker button { display:flex; align-items:center; gap:8px; justify-content:flex-start; }
+.picker img { width:20px; height:20px; }
+.wallet-panel { display:flex; gap:24px; flex-wrap:wrap; align-items:center; justify-content:space-between; margin-top:14px; }
+.small-text { font-size:12px; margin:0; }
+a { color:var(--accent); }
+.record { margin:6px 0 10px; } .record pre { white-space:pre-wrap; word-break:break-all; font-size:11px; background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:8px; max-height:260px; overflow:auto; }

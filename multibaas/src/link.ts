@@ -19,6 +19,7 @@ if (status.chainID !== d.chainId) throw new Error(`deployment chain ${d.chainId}
 for (const [label, name] of [
   [LABELS.registry, 'InvoiceRegistry'],
   [LABELS.risk, 'CreditRiskModel'],
+  [LABELS.vault, 'CollateralVault'],
   [LABELS.hook, 'MaturityCurveHook'],
   [LABELS.market, 'TegataMarket'],
   [LABELS.invoiceToken, 'InvoiceToken'],
@@ -31,8 +32,10 @@ for (const [label, name] of [
 const link = linkAlias;
 await link(LABELS.registry, d.registry, LABELS.registry, d.startBlock);
 await link(LABELS.risk, d.risk, LABELS.risk, d.startBlock);
+await link(LABELS.vault, d.vault, LABELS.vault, d.startBlock);
 await link(LABELS.hook, d.hook, LABELS.hook, d.startBlock);
-await link(LABELS.market, d.market, LABELS.market, d.startBlock);
+// The market can be redeployed on its own (see README); index it from its own creation block when recorded.
+await link(LABELS.market, d.market, LABELS.market, (d as any).marketStartBlock ?? d.startBlock);
 // The PoolManager is shared by every v4 pool on the chain: sync only from our deployment block.
 await link(LABELS.poolManager, d.poolManager, LABELS.poolManager, d.startBlock);
 

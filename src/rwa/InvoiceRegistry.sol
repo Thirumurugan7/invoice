@@ -7,6 +7,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
 import {InvoiceToken} from "./InvoiceToken.sol";
 import {CreditRiskModel} from "./CreditRiskModel.sol";
+import {CollateralVault} from "./CollateralVault.sol";
 
 /// @title InvoiceRegistry — tokenized receivables settled in JPYC (a digital replacement for paper 手形)
 /// @notice Lifecycle:
@@ -20,6 +21,12 @@ import {CreditRiskModel} from "./CreditRiskModel.sol";
 ///   4. The debtor pays JPYC into escrow (early or at maturity). Fully paid => Settled; holders redeem 1:1.
 ///   5. Not fully paid by maturity + grace => anyone can mark Defaulted; holders redeem pro-rata (recovery).
 ///   Redemption pays JPYC first, then burns the tokens.
+///   Collateral: weak debtors (G4–G5) must keep JPYC in CollateralVault covering 20% of what they owe before new
+///   invoices can be registered against them; on default the collateral is seized into the invoice's payout.
+///   Holder policy (ERC-3643 style): invoice tokens can only move to KYB-verified companies, operator-approved
+///   investors, or approved venues (the Uniswap v4 PoolManager). Every transfer checks `canHold`.
+///   Invoice details (reference number, parties, terms, live price) are on-chain: `invoiceMetadata(id)` renders
+///   JSON, served by each token's `contractURI()` (ERC-7572).
 contract InvoiceRegistry is AccessControl {
     using SafeERC20 for IERC20;
 
@@ -56,12 +63,17 @@ contract InvoiceRegistry is AccessControl {
 
     IERC20 public immutable jpyc;
     CreditRiskModel public immutable risk;
+    CollateralVault public immutable vault;
     uint256 public invoiceCount;
     mapping(uint256 => Invoice) internal _invoices;
     mapping(address => uint256) public idOfToken;
     mapping(bytes32 => uint256) public idOfDocHash;
     mapping(address => bytes32) public companyIdHash; // keccak256(法人番号) of verified companies
     mapping(address => string) public companyName;
+    mapping(address => bool) public approvedInvestor; // operator-approved (investor KYC) holders
+    mapping(address => bool) public isVenue; // contracts allowed to hold tokens in custody (Uniswap PoolManager)
+    mapping(uint256 => string) public invoiceRef;
+    mapping(address => uint256) public outstandingOf; // unpaid face of the debtor's pending + accepted invoices // the supplier's invoice number, e.g. SKR-2026-0926-001
 
     event CompanyVerified(address indexed company, bytes32 indexed corpIdHash, string name);
     event CompanyRevoked(address indexed company);
@@ -75,6 +87,9 @@ contract InvoiceRegistry is AccessControl {
         uint32 rateAtIssueBps,
         bytes32 docHash
     );
+    event InvoiceMetadata(uint256 indexed id, string ref, string supplierName, string debtorName);
+    event InvestorApproved(address indexed investor, bool approved);
+    event VenueSet(address indexed venue, bool allowed);
     event InvoiceAccepted(uint256 indexed id, address indexed debtor, address token, uint256 face);
     event InvoiceRejected(uint256 indexed id, address indexed debtor, string reason);
     event InvoiceFrozen(uint256 indexed id, bool frozen);
@@ -85,6 +100,7 @@ contract InvoiceRegistry is AccessControl {
 
     error NotVerified(address company);
     error NotRated(address debtor);
+    error CollateralRequired(address debtor, uint256 required, uint256 posted);
     error InvalidTerms();
     error DuplicateInvoice(uint256 existingId);
     error NotDebtor();
@@ -92,9 +108,10 @@ contract InvoiceRegistry is AccessControl {
     error NotYetDefaultable(uint256 at);
     error NothingToRedeem();
 
-    constructor(IERC20 jpyc_, CreditRiskModel risk_, address admin) {
+    constructor(IERC20 jpyc_, CreditRiskModel risk_, CollateralVault vault_, address admin) {
         jpyc = jpyc_;
         risk = risk_;
+        vault = vault_;
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(OPERATOR_ROLE, admin);
     }
@@ -115,13 +132,29 @@ contract InvoiceRegistry is AccessControl {
         return companyIdHash[company] != bytes32(0);
     }
 
+    // ---------------------------------------------------------------- holder policy (operator)
+    function approveInvestor(address investor, bool approved) external onlyRole(OPERATOR_ROLE) {
+        approvedInvestor[investor] = approved;
+        emit InvestorApproved(investor, approved);
+    }
+
+    function setVenue(address venue, bool allowed) external onlyRole(OPERATOR_ROLE) {
+        isVenue[venue] = allowed;
+        emit VenueSet(venue, allowed);
+    }
+
+    /// @notice Checked by every InvoiceToken transfer: may `holder` receive invoice tokens?
+    function canHold(address holder) public view returns (bool) {
+        return isVerified(holder) || approvedInvestor[holder] || isVenue[holder];
+    }
+
     function setFrozen(uint256 id, bool frozen) external onlyRole(OPERATOR_ROLE) {
         _invoices[id].frozen = frozen;
         emit InvoiceFrozen(id, frozen);
     }
 
     // ---------------------------------------------------------------- lifecycle
-    function registerInvoice(address debtor, uint256 face, uint64 maturity, bytes32 docHash)
+    function registerInvoice(address debtor, uint256 face, uint64 maturity, bytes32 docHash, string calldata ref)
         external
         returns (uint256 id)
     {
@@ -132,11 +165,16 @@ contract InvoiceRegistry is AccessControl {
             revert InvalidTerms();
         }
         if (idOfDocHash[docHash] != 0) revert DuplicateInvoice(idOfDocHash[docHash]);
+        uint256 need = vault.required(debtor, face);
+        if (vault.collateralOf(debtor) < need) revert CollateralRequired(debtor, need, vault.collateralOf(debtor));
+        outstandingOf[debtor] += face;
         uint32 rateNow = risk.rateBps(debtor);
 
         id = ++invoiceCount;
         string memory n = Strings.toString(id);
-        InvoiceToken token = new InvoiceToken(string.concat("Tegata Invoice #", n), string.concat("TGT-", n), id);
+        string memory r = bytes(ref).length == 0 ? string.concat("#", n) : ref;
+        InvoiceToken token = new InvoiceToken(string.concat("Tegata ", r), string.concat("TGT-", n), id);
+        invoiceRef[id] = r;
         _invoices[id] = Invoice({
             supplier: msg.sender,
             debtor: debtor,
@@ -154,6 +192,7 @@ contract InvoiceRegistry is AccessControl {
         idOfToken[address(token)] = id;
         idOfDocHash[docHash] = id;
         emit InvoiceRegistered(id, msg.sender, debtor, address(token), face, maturity, rateNow, docHash);
+        emit InvoiceMetadata(id, r, companyName[msg.sender], companyName[debtor]);
     }
 
     function acceptInvoice(uint256 id) external {
@@ -171,6 +210,7 @@ contract InvoiceRegistry is AccessControl {
         if (msg.sender != inv.debtor) revert NotDebtor();
         if (inv.status != Status.Pending) revert BadStatus(inv.status);
         inv.status = Status.Rejected;
+        outstandingOf[inv.debtor] -= inv.face;
         emit InvoiceRejected(id, msg.sender, reason);
     }
 
@@ -182,6 +222,7 @@ contract InvoiceRegistry is AccessControl {
         if (amount > due) amount = due;
         jpyc.safeTransferFrom(msg.sender, address(this), amount);
         inv.funded += amount;
+        outstandingOf[inv.debtor] -= amount;
         emit InvoicePaid(id, msg.sender, amount, inv.funded);
         if (inv.funded == inv.face) {
             inv.status = Status.Settled;
@@ -196,6 +237,11 @@ contract InvoiceRegistry is AccessControl {
         uint256 at = uint256(inv.maturity) + GRACE;
         if (block.timestamp < at) revert NotYetDefaultable(at);
         inv.status = Status.Defaulted;
+        // Seize the debtor's collateral (up to the shortfall) into this invoice's payout, then write off the rest.
+        uint256 shortfall = inv.face - inv.funded;
+        uint256 seized = vault.seize(inv.debtor, id, shortfall);
+        inv.funded += seized;
+        outstandingOf[inv.debtor] -= shortfall;
         risk.record(inv.debtor, CreditRiskModel.CreditEvent.Default, id);
         emit InvoiceDefaulted(id, inv.funded, inv.face);
     }
@@ -234,5 +280,56 @@ contract InvoiceRegistry is AccessControl {
     function isTradable(uint256 id) public view returns (bool) {
         Invoice storage inv = _invoices[id];
         return inv.status == Status.Accepted && !inv.frozen && block.timestamp + TRADING_CUTOFF < inv.maturity;
+    }
+
+    // ---------------------------------------------------------------- on-chain invoice metadata
+    /// @notice JSON description of the invoice (served by InvoiceToken.contractURI). Amounts in JPY (whole yen),
+    ///         price in 1e18 = face value.
+    function invoiceMetadata(uint256 id) external view returns (string memory) {
+        Invoice storage inv = _invoices[id];
+        string memory head = string.concat(
+            '{"name":"Tegata ', _esc(invoiceRef[id]), '","symbol":"TGT-', Strings.toString(id),
+            '","description":"Tokenized, debtor-acknowledged invoice. 1 token = 1 JPY of face value, redeemable in JPYC at maturity.",'
+        );
+        string memory parties = string.concat(
+            '"invoice":{"id":', Strings.toString(id), ',"ref":"', _esc(invoiceRef[id]),
+            '","supplier":"', Strings.toHexString(inv.supplier), '","supplierName":"', _esc(companyName[inv.supplier]),
+            '","debtor":"', Strings.toHexString(inv.debtor), '","debtorName":"', _esc(companyName[inv.debtor]), '",'
+        );
+        string memory terms = string.concat(
+            '"faceJPY":', Strings.toString(inv.face / 1e18), ',"issuedAt":', Strings.toString(inv.issuedAt),
+            ',"maturity":', Strings.toString(inv.maturity), ',"status":"', _statusName(inv.status),
+            '","frozen":', inv.frozen ? "true" : "false", ',"fundedJPY":', Strings.toString(inv.funded / 1e18), ','
+        );
+        string memory pricing = string.concat(
+            '"rateAtIssueBps":', Strings.toString(inv.rateAtIssueBps), ',"rateBps":', Strings.toString(rateOf(id)),
+            ',"fairPrice1e18":', Strings.toString(fairPrice(id, block.timestamp)), ',"docHash":"',
+            Strings.toHexString(uint256(inv.docHash), 32), '","token":"', Strings.toHexString(address(inv.token)), '"}}'
+        );
+        return string.concat(head, parties, terms, pricing);
+    }
+
+    function _statusName(Status st) internal pure returns (string memory) {
+        if (st == Status.Pending) return "Pending";
+        if (st == Status.Accepted) return "Accepted";
+        if (st == Status.Rejected) return "Rejected";
+        if (st == Status.Settled) return "Settled";
+        if (st == Status.Defaulted) return "Defaulted";
+        return "None";
+    }
+
+    /// @dev Escape `"` and `\` so operator-entered names can't break the JSON.
+    function _esc(string memory v) internal pure returns (string memory) {
+        bytes memory b = bytes(v);
+        uint256 extra;
+        for (uint256 i; i < b.length; i++) if (b[i] == '"' || b[i] == "\\") extra++;
+        if (extra == 0) return v;
+        bytes memory o = new bytes(b.length + extra);
+        uint256 j;
+        for (uint256 i; i < b.length; i++) {
+            if (b[i] == '"' || b[i] == "\\") o[j++] = "\\";
+            o[j++] = b[i];
+        }
+        return string(o);
     }
 }
