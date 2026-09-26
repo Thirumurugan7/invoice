@@ -8,14 +8,22 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { createPublicClient, http, isAddress, getAddress } from 'viem';
+import { createPublicClient, fallback, http, isAddress, getAddress } from 'viem';
+import { sepolia } from 'viem/chains';
 import { z } from 'zod';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dep = JSON.parse(readFileSync(process.env.TEGATA_DEPLOYMENT ?? resolve(here, '../public/deployment.json'), 'utf8'));
 const ABI = JSON.parse(readFileSync(resolve(here, '../src/generated/abis.json'), 'utf8'));
 const rpc = process.env.TEGATA_RPC_URL ?? (dep.chainId === 11155111 ? 'https://ethereum-sepolia-rpc.publicnode.com' : 'http://127.0.0.1:8546');
-const pub = createPublicClient({ transport: http(rpc) });
+// On Sepolia, fail over between public RPCs (they rate-limit per IP) and batch reads through Multicall3.
+const pub = dep.chainId === 11155111
+  ? createPublicClient({
+      chain: sepolia,
+      transport: fallback([...new Set([rpc, 'https://1rpc.io/sepolia', 'https://sepolia.gateway.tenderly.co'])].map((url) => http(url))),
+      batch: { multicall: true },
+    })
+  : createPublicClient({ transport: http(rpc) });
 const r = (address, abi, functionName, args = []) => pub.readContract({ address, abi, functionName, args });
 
 const STATUS = ['None', 'Pending', 'Accepted', 'Rejected', 'Settled', 'Defaulted'];

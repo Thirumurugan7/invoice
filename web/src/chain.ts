@@ -1,4 +1,4 @@
-import { createPublicClient, createWalletClient, custom, getAddress, http, zeroAddress, type Address, type Chain, type PublicClient, type WalletClient } from 'viem';
+import { createPublicClient, createWalletClient, custom, fallback, getAddress, http, zeroAddress, type Address, type Chain, type PublicClient, type WalletClient } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { foundry, sepolia } from 'viem/chains';
 import abis from './generated/abis.json';
@@ -46,10 +46,18 @@ export type Eip1193 = { request: (a: { method: string; params?: unknown[] }) => 
 export type Session = { account: Address; wallet?: WalletClient; pub: PublicClient; provider?: Eip1193; kind: 'local' | 'wallet' | 'readonly' };
 
 const SEPOLIA_RPC = (import.meta.env.VITE_SEPOLIA_RPC as string | undefined) ?? 'https://ethereum-sepolia-rpc.publicnode.com';
+/// Public Sepolia endpoints rate-limit per IP, so reads fail over to the next one (all have Multicall3).
+const SEPOLIA_FALLBACKS = [SEPOLIA_RPC, 'https://1rpc.io/sepolia', 'https://sepolia.gateway.tenderly.co'].filter((u, i, a) => a.indexOf(u) === i);
 const chainOf = (chainId: number) => (chainId === sepolia.id ? { chain: sepolia, rpc: SEPOLIA_RPC } : { chain: localChain, rpc: LOCAL_RPC });
 const readClient = (chainId: number) => {
   const { chain, rpc } = chainOf(chainId);
-  return createPublicClient({ chain, transport: http(rpc) }) as PublicClient;
+  if (chain.id !== sepolia.id) return createPublicClient({ chain, transport: http(rpc) }) as PublicClient;
+  // Each 5-second refresh reads ~10 values per invoice; Multicall3 folds them into a handful of eth_calls.
+  return createPublicClient({
+    chain,
+    transport: fallback(SEPOLIA_FALLBACKS.map((url) => http(url))),
+    batch: { multicall: true },
+  }) as PublicClient;
 };
 
 export function readonlySession(chainId: number): Session {
