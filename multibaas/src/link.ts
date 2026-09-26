@@ -40,12 +40,25 @@ await link(LABELS.market, d.market, LABELS.market, (d as any).marketStartBlock ?
 await link(LABELS.poolManager, d.poolManager, LABELS.poolManager, d.startBlock);
 
 // 3. Backfill invoice tokens already registered (new ones are linked live by webhook-server.ts)
+// Each token is synced from the block its invoice was registered in (the token is created there), which also keeps
+// the sync inside the MultiBaas plan's past-logs depth limit.
+const SYNC_DEPTH = Number(process.env.MB_SYNC_DEPTH ?? 100);
+const registeredAt = new Map<string, number>();
+for (let offset = 0; ; offset += 50) {
+  const q = { events: [{ eventName: 'InvoiceRegistered', select: [{ type: 'input', inputIndex: 0, alias: 'id' }, { type: 'block_number', alias: 'block' }], filter: { fieldType: 'contract_address_alias', operator: 'equal', value: LABELS.registry } }] };
+  const rows = ((await new MultiBaas.EventQueriesApi(cfg).executeArbitraryEventQuery(q as any, offset, 50)).data.result?.rows ?? []) as Record<string, any>[];
+  for (const r of rows) registeredAt.set(String(r.id), Number(r.block));
+  if (rows.length < 50) break;
+}
 const count = await contracts.callContractFunction(LABELS.registry, LABELS.registry, 'invoiceCount', { args: [] });
 const n = Number((count.data.result as any).output ?? 0);
 for (let id = 1; id <= n; id++) {
   const inv = await contracts.callContractFunction(LABELS.registry, LABELS.registry, 'invoice', { args: [String(id)] });
   const token = (inv.data.result as any).output?.token ?? (inv.data.result as any).output?.[2];
-  if (token) await link(invoiceAlias(id), token, LABELS.invoiceToken, d.startBlock);
+  // The free plan only syncs very recent history; older tokens are indexed from the edge of that window.
+  const from = Math.max(registeredAt.get(String(id)) ?? d.startBlock, Number(status.blockNumber) - SYNC_DEPTH);
+  // The plan also caps linked contracts; warn and keep going rather than abort the whole run.
+  if (token) await link(invoiceAlias(id), token, LABELS.invoiceToken, from).catch((e: Error) => console.log(`  warn ${invoiceAlias(id)}: ${e.message}`));
 }
 
 // 4. Webhook for live automation

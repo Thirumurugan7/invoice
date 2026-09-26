@@ -4,7 +4,7 @@ import type * as MultiBaas from '@curvegrid/multibaas-sdk';
 
 export const multibaasEnabled = true;
 
-async function runQuery(query: MultiBaas.EventQuery, offset: number, limit: number): Promise<Record<string, any>[]> {
+export async function runEventQuery(query: MultiBaas.EventQuery, offset: number, limit: number): Promise<Record<string, any>[]> {
   const response = await fetch('/api/mb/query', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -24,7 +24,7 @@ export async function fetchBookFromMultiBaas(): Promise<MbBook> {
   const q = async (query: MultiBaas.EventQuery, max = Infinity) => {
     const rows: Record<string, any>[] = [];
     for (let offset = 0; rows.length < max; offset += 50) {
-      const page = await runQuery(query, offset, 50);
+      const page = await runEventQuery(query, offset, 50);
       rows.push(...page);
       if (page.length < 50) break;
     }

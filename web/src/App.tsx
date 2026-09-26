@@ -1,3 +1,4 @@
+import { EventsPage } from './events';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { formatEther, getAddress, type Address } from 'viem';
 import {
@@ -24,13 +25,14 @@ import { ConsumerDashboard } from './consumer';
 import { ActivityPage, BookPage, DebtorPage, InvestorPage, OperatorPage, PermissionsPage, PlaybookPage, SupplierPage } from './pages';
 import { useBook, useTx, type Book, type TxStatus } from './state';
 
-const TABS = ['Book', 'Invoices', 'Marketplace', 'Playbook', 'Activity', 'Permissions', 'Operator'] as const;
+const TABS = ['Book', 'Invoices', 'Marketplace', 'Events', 'Playbook', 'Activity', 'Permissions', 'Operator'] as const;
 type Tab = (typeof TABS)[number];
 const CONSUMER_TABS = ['Book', 'Invoices', 'Playbook'] as const;
 const TAB_LABEL: Record<Tab, string> = {
   Book: 'Dashboard',
   Invoices: 'Invoices',
   Marketplace: 'Marketplace',
+  Events: 'On-chain events (Curvegrid MultiBaas)',
   Permissions: 'Wallet & Permissions',
   Activity: 'Transaction Activity',
   Playbook: 'Playbook',
@@ -51,6 +53,11 @@ const TAB_ICON: Record<Tab, JSX.Element> = {
   Marketplace: (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <path d="M4 9h16" /><path d="M6 9l1-4h10l1 4" /><path d="M7 9v10" /><path d="M17 9v10" /><path d="M4 19h16" />
+    </svg>
+  ),
+  Events: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3.5 12h3l2.5-6 4 12 2.5-6h5" />
     </svg>
   ),
   Permissions: (
@@ -344,7 +351,8 @@ export default function App() {
         )}
         <Banner status={status} chainId={dep.chainId} />
         {err && <p className="error">{err}</p>}
-        {book && (
+        {view === 'Events' && <main><EventsPage chainId={dep.chainId} /></main>}
+        {book && view !== 'Events' && (
           <main>
             {view === 'Invoices' && (
               book.me.isOperator
